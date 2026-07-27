@@ -196,20 +196,30 @@ type ExitNode struct {
 	Country     string
 }
 
-// ExitNode resolves the exit relay of the instance's newest open general-purpose
-// circuit.
+// ExitNode resolves the exit relay this instance is currently exiting through.
 //
 // This reads the exit relay's advertised address from tor's own consensus view,
 // which costs no Tor bandwidth — unlike fetching an IP-echo URL through the
 // circuit. It is the real exit address a target site would see.
+//
+// Circuits carrying live streams are preferred over merely-built ones: tor
+// builds circuits preemptively for future requests, and reporting one of those
+// would name an exit no traffic has ever used.
 func (c *Control) ExitNode() (ExitNode, error) {
 	circuits, err := c.GetInfo("circuit-status")
 	if err != nil {
 		return ExitNode{}, err
 	}
-	fp, err := newestExitFingerprint(circuits)
-	if err != nil {
-		return ExitNode{}, err
+
+	var fp string
+	if streams, err := c.GetInfo("stream-status"); err == nil {
+		fp = attachedExitFingerprint(streams, circuits)
+	}
+	if fp == "" {
+		fp, err = newestExitFingerprint(circuits)
+		if err != nil {
+			return ExitNode{}, err
+		}
 	}
 
 	desc, err := c.GetInfo("ns/id/" + fp)
@@ -229,6 +239,59 @@ func (c *Control) ExitNode() (ExitNode, error) {
 	return node, nil
 }
 
+// attachedExitFingerprint finds the exit of a circuit that currently carries a
+// stream, which is the exit traffic is actually leaving through.
+//
+// stream-status lines look like:
+//
+//	<streamID> SUCCEEDED <circuitID> example.com:443
+//
+// Returns "" when no stream is attached — between requests there usually is
+// none, and the caller then falls back to the newest built circuit.
+func attachedExitFingerprint(streamStatus, circuitStatus string) string {
+	var circuitID string
+	for line := range strings.SplitSeq(streamStatus, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 {
+			continue
+		}
+		// NEW and NEWRESOLVE streams have no circuit yet; their circuit id is 0.
+		if fields[1] != "SUCCEEDED" || fields[2] == "0" {
+			continue
+		}
+		circuitID = fields[2]
+	}
+	if circuitID == "" {
+		return ""
+	}
+	return exitFingerprintOfCircuit(circuitStatus, circuitID)
+}
+
+// exitFingerprintOfCircuit returns the last hop of one circuit by id.
+func exitFingerprintOfCircuit(circuitStatus, circuitID string) string {
+	for line := range strings.SplitSeq(circuitStatus, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 || fields[0] != circuitID {
+			continue
+		}
+		return lastHopFingerprint(fields[2])
+	}
+	return ""
+}
+
+// lastHopFingerprint extracts the exit fingerprint from a circuit path.
+//
+// Each hop is "$FINGERPRINT~Nickname" or "$FINGERPRINT=Nickname" — named relays
+// use '='.
+func lastHopFingerprint(path string) string {
+	hops := strings.Split(path, ",")
+	last := strings.TrimPrefix(hops[len(hops)-1], "$")
+	if i := strings.IndexAny(last, "~="); i >= 0 {
+		last = last[:i]
+	}
+	return last
+}
+
 // newestExitFingerprint picks the last hop of the most recently built BUILT
 // circuit. Circuits are listed oldest-first, so the last match is the newest.
 func newestExitFingerprint(circuitStatus string) (string, error) {
@@ -246,14 +309,7 @@ func newestExitFingerprint(circuitStatus string) (string, error) {
 		if !strings.Contains(line, "PURPOSE=GENERAL") {
 			continue
 		}
-		hops := strings.Split(fields[2], ",")
-		last := hops[len(hops)-1]
-		// Each hop is "$FINGERPRINT~Nickname" or "$FINGERPRINT=Nickname".
-		last = strings.TrimPrefix(last, "$")
-		if i := strings.IndexAny(last, "~="); i >= 0 {
-			last = last[:i]
-		}
-		if last != "" {
+		if last := lastHopFingerprint(fields[2]); last != "" {
 			fingerprint = last
 		}
 	}

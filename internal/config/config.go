@@ -56,10 +56,11 @@ type Config struct {
 	MaxRemediationBackoff time.Duration
 
 	// Tor circuit policy
-	ExitNodes        string
-	ExcludeExitNodes string
-	StrictNodes      bool
-	ExtraTorConfig   string
+	ExitNodes           string
+	ExcludeExitNodes    string
+	StrictNodes         bool
+	MaxCircuitDirtiness time.Duration
+	ExtraTorConfig      string
 
 	// Observability
 	HistoryResolution time.Duration
@@ -96,6 +97,16 @@ func Defaults() Config {
 		EscalationWindow:      5 * time.Minute,
 		RemediationBackoff:    30 * time.Second,
 		MaxRemediationBackoff: 10 * time.Minute,
+
+		// Tor's own default is 10 minutes, which silently breaks the promise
+		// this pool makes: a caller stays pinned to one instance, but that
+		// instance would swap exits underneath it every 10 minutes. For a
+		// scraper the exit IP *is* the identity, so circuits are reused for
+		// much longer and change only on rotation or remediation. The cost is
+		// linkability — a longer-lived circuit means more requests share one
+		// observable identity, which is the point here but is the opposite of
+		// what a privacy-focused client would want.
+		MaxCircuitDirtiness: time.Hour,
 
 		HistoryResolution: time.Second,
 		HistoryWindow:     5 * time.Minute,
@@ -162,6 +173,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envString(look, "TOR_EXIT_NODES", &c.ExitNodes))
 	collect(envString(look, "TOR_EXCLUDE_EXIT_NODES", &c.ExcludeExitNodes))
 	collect(envBool(look, "TOR_STRICT_NODES", &c.StrictNodes))
+	collect(envDuration(look, "TOR_MAX_CIRCUIT_DIRTINESS", &c.MaxCircuitDirtiness))
 	collect(envString(look, "TOR_EXTRA_CONFIG", &c.ExtraTorConfig))
 
 	collect(envDuration(look, "HISTORY_RESOLUTION", &c.HistoryResolution))
@@ -241,6 +253,9 @@ func (c *Config) Validate() error {
 	if c.MaxRemediationBackoff < c.RemediationBackoff {
 		bad("MAX_REMEDIATION_BACKOFF (%s) cannot be shorter than REMEDIATION_BACKOFF (%s)",
 			c.MaxRemediationBackoff, c.RemediationBackoff)
+	}
+	if c.MaxCircuitDirtiness <= 0 {
+		bad("TOR_MAX_CIRCUIT_DIRTINESS must be positive")
 	}
 	if c.HistoryResolution <= 0 {
 		bad("HISTORY_RESOLUTION must be positive")

@@ -14,17 +14,18 @@ import (
 // FleetOptions configures a Fleet. It mirrors the subset of the process
 // configuration that every instance shares.
 type FleetOptions struct {
-	Size             int
-	Binary           string
-	DataDir          string
-	SocksPortFor     func(index int) int
-	ControlPortFor   func(index int) int
-	SpawnStagger     time.Duration
-	MinReady         int
-	ExitNodes        string
-	ExcludeExitNodes string
-	StrictNodes      bool
-	ExtraTorConfig   string
+	Size                int
+	Binary              string
+	DataDir             string
+	SocksPortFor        func(index int) int
+	ControlPortFor      func(index int) int
+	SpawnStagger        time.Duration
+	MinReady            int
+	ExitNodes           string
+	ExcludeExitNodes    string
+	StrictNodes         bool
+	MaxCircuitDirtiness time.Duration
+	ExtraTorConfig      string
 }
 
 // Fleet supervises a set of tor instances.
@@ -103,14 +104,15 @@ func (f *Fleet) Add(ctx context.Context, ready chan<- int) (*Instance, error) {
 	index := f.nextIndex
 	f.nextIndex++
 	cfg := InstanceConfig{
-		Index:            index,
-		DataDirectory:    filepath.Join(f.opts.DataDir, strconv.Itoa(index)),
-		SocksPort:        f.opts.SocksPortFor(index),
-		ControlPort:      f.opts.ControlPortFor(index),
-		ExitNodes:        f.opts.ExitNodes,
-		ExcludeExitNodes: f.opts.ExcludeExitNodes,
-		StrictNodes:      f.opts.StrictNodes,
-		ExtraConfig:      f.opts.ExtraTorConfig,
+		Index:               index,
+		DataDirectory:       filepath.Join(f.opts.DataDir, strconv.Itoa(index)),
+		SocksPort:           f.opts.SocksPortFor(index),
+		ControlPort:         f.opts.ControlPortFor(index),
+		ExitNodes:           f.opts.ExitNodes,
+		ExcludeExitNodes:    f.opts.ExcludeExitNodes,
+		StrictNodes:         f.opts.StrictNodes,
+		MaxCircuitDirtiness: f.opts.MaxCircuitDirtiness,
+		ExtraConfig:         f.opts.ExtraTorConfig,
 	}
 	inst := NewInstance(f.opts.Binary, cfg, f.log)
 	f.instances[index] = inst

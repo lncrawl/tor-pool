@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // InstanceConfig is everything needed to render one tor instance's torrc.
@@ -20,6 +21,11 @@ type InstanceConfig struct {
 	ExitNodes        string
 	ExcludeExitNodes string
 	StrictNodes      bool
+
+	// MaxCircuitDirtiness is how long a circuit may be reused. This is what
+	// makes an instance's exit IP stable enough to call an identity; tor's own
+	// default of 10 minutes would rotate it out from under a pinned session.
+	MaxCircuitDirtiness time.Duration
 
 	// ExtraConfig is appended verbatim, for options this struct does not model.
 	ExtraConfig string
@@ -71,6 +77,13 @@ func (ic InstanceConfig) Torrc() string {
 	// entry point and the exit diversity we are paying for shrinks.
 	b.WriteString("\n# Independent guard selection per instance.\n")
 	b.WriteString("UseEntryGuards 1\n")
+
+	// Hold a circuit long enough that a pinned session keeps one exit IP.
+	// Tor's 10-minute default would change the exit under a caller that never
+	// asked to rotate.
+	if ic.MaxCircuitDirtiness > 0 {
+		fmt.Fprintf(&b, "MaxCircuitDirtiness %d\n", int(ic.MaxCircuitDirtiness.Seconds()))
+	}
 
 	if ic.ExitNodes != "" {
 		fmt.Fprintf(&b, "ExitNodes %s\n", ic.ExitNodes)

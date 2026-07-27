@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/lncrawl/tor-pool/internal/config"
+	"github.com/lncrawl/tor-pool/internal/pool"
+	"github.com/lncrawl/tor-pool/internal/proxy"
 	"github.com/lncrawl/tor-pool/internal/tor"
 )
 
@@ -60,17 +62,18 @@ func run() error {
 	defer stop()
 
 	fleet := tor.NewFleet(tor.FleetOptions{
-		Size:             cfg.PoolSize,
-		Binary:           cfg.TorBinary,
-		DataDir:          cfg.DataDir,
-		SocksPortFor:     cfg.InstanceSocksPort,
-		ControlPortFor:   cfg.InstanceControlPort,
-		SpawnStagger:     cfg.SpawnStagger,
-		MinReady:         cfg.MinReady,
-		ExitNodes:        cfg.ExitNodes,
-		ExcludeExitNodes: cfg.ExcludeExitNodes,
-		StrictNodes:      cfg.StrictNodes,
-		ExtraTorConfig:   cfg.ExtraTorConfig,
+		Size:                cfg.PoolSize,
+		Binary:              cfg.TorBinary,
+		DataDir:             cfg.DataDir,
+		SocksPortFor:        cfg.InstanceSocksPort,
+		ControlPortFor:      cfg.InstanceControlPort,
+		SpawnStagger:        cfg.SpawnStagger,
+		MinReady:            cfg.MinReady,
+		ExitNodes:           cfg.ExitNodes,
+		ExcludeExitNodes:    cfg.ExcludeExitNodes,
+		StrictNodes:         cfg.StrictNodes,
+		MaxCircuitDirtiness: cfg.MaxCircuitDirtiness,
+		ExtraTorConfig:      cfg.ExtraTorConfig,
 	}, log)
 
 	// Stopping the fleet is the last thing to happen: the API must stay up
@@ -82,9 +85,22 @@ func run() error {
 		log.Info("all instances stopped")
 	}()
 
+	p := pool.New(&cfg, fleet, log)
+	go p.Run(ctx)
+
+	proxies := proxy.NewServer(&cfg, p, log)
+	if err := proxies.Start(ctx); err != nil {
+		return fmt.Errorf("start proxy listeners: %w", err)
+	}
+	defer func() {
+		if err := proxies.Close(); err != nil {
+			log.Error("proxy shutdown", "error", err)
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.APIPort)),
-		Handler:           statusHandler(fleet, &cfg),
+		Handler:           statusHandler(p, &cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -111,10 +127,11 @@ func run() error {
 	return nil
 }
 
-// statusHandler is the interim API for part 2: enough to observe the pool
-// booting. The full REST surface replaces it.
-func statusHandler(fleet *tor.Fleet, cfg *config.Config) http.Handler {
+// statusHandler is the interim API: enough to observe and drive the pool from
+// the command line. The full REST surface, SSE stream and dashboard replace it.
+func statusHandler(p *pool.Pool, cfg *config.Config) http.Handler {
 	mux := http.NewServeMux()
+	fleet := p.Fleet()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		if fleet.ReadyCount() == 0 {
@@ -126,42 +143,7 @@ func statusHandler(fleet *tor.Fleet, cfg *config.Config) http.Handler {
 	})
 
 	mux.HandleFunc("GET /api/instances", func(w http.ResponseWriter, _ *http.Request) {
-		type instanceView struct {
-			ID          int    `json:"id"`
-			Ready       bool   `json:"ready"`
-			Running     bool   `json:"running"`
-			Bootstrap   int    `json:"bootstrap"`
-			Pid         int    `json:"pid"`
-			UptimeSecs  int    `json:"uptime_secs"`
-			SocksAddr   string `json:"socks_addr"`
-			ExitIP      string `json:"exit_ip"`
-			ExitCountry string `json:"exit_country"`
-			ExitNick    string `json:"exit_nickname"`
-		}
-
-		instances := fleet.Instances()
-		out := make([]instanceView, 0, len(instances))
-		for _, inst := range instances {
-			// Refresh opportunistically: the exit relay only becomes knowable
-			// once a circuit is built, which is after bootstrap completes.
-			if inst.Ready() && inst.ExitNode().Address == "" {
-				_, _ = inst.RefreshExitNode()
-			}
-			node := inst.ExitNode()
-			out = append(out, instanceView{
-				ID:          inst.Index(),
-				Ready:       inst.Ready(),
-				Running:     inst.Running(),
-				Bootstrap:   inst.Bootstrap(),
-				Pid:         inst.Pid(),
-				UptimeSecs:  int(time.Since(inst.StartedAt()).Seconds()),
-				SocksAddr:   inst.Config().SocksAddr(),
-				ExitIP:      node.Address,
-				ExitCountry: node.Country,
-				ExitNick:    node.Nickname,
-			})
-		}
-		writeJSON(w, out)
+		writeJSON(w, instanceViews(p))
 	})
 
 	mux.HandleFunc("GET /api/pool", func(w http.ResponseWriter, _ *http.Request) {
@@ -169,13 +151,120 @@ func statusHandler(fleet *tor.Fleet, cfg *config.Config) http.Handler {
 			"version":    version,
 			"size":       fleet.Size(),
 			"ready":      fleet.ReadyCount(),
+			"sessions":   p.SessionCount(),
 			"pool_size":  cfg.PoolSize,
 			"socks_port": cfg.SocksPort,
 			"http_port":  cfg.HTTPPort,
 		})
 	})
 
+	mux.HandleFunc("GET /api/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, p.Sessions())
+	})
+
+	mux.HandleFunc("GET /api/sessions/{key}", func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := p.Session(r.PathValue("key"))
+		if !ok {
+			http.Error(w, "no such session", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, sess)
+	})
+
+	mux.HandleFunc("POST /api/sessions/{key}/rotate", func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+		newnym := r.URL.Query().Get("newnym") == "true"
+
+		inst, err := p.RotateSession(r.Context(), key, newnym)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// Read the new instance's exit now rather than serving a cached value
+		// from before the move. It is still a best guess until traffic actually
+		// flows: no stream is attached to this session yet, so tor has not
+		// committed to a circuit for it.
+		node, err := inst.RefreshExitNode()
+		if err != nil {
+			node = inst.ExitNode()
+		}
+		writeJSON(w, map[string]any{
+			"session":  key,
+			"instance": inst.Index(),
+			"exit_ip":  node.Address,
+		})
+	})
+
+	mux.HandleFunc("POST /api/sessions/{key}/failure", func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		// A failure report with no body is still a valid signal.
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Reason == "" {
+			body.Reason = "unspecified"
+		}
+
+		instance, ok := p.ReportFailure(key, body.Reason)
+		if !ok {
+			http.Error(w, "no such session", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"session": key, "instance": instance})
+	})
+
+	mux.HandleFunc("DELETE /api/sessions/{key}", func(w http.ResponseWriter, r *http.Request) {
+		if !p.DropSession(r.PathValue("key")) {
+			http.Error(w, "no such session", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	return mux
+}
+
+// instanceView is the interim JSON shape for an instance.
+type instanceView struct {
+	ID          int    `json:"id"`
+	Ready       bool   `json:"ready"`
+	Running     bool   `json:"running"`
+	Bootstrap   int    `json:"bootstrap"`
+	Pid         int    `json:"pid"`
+	UptimeSecs  int    `json:"uptime_secs"`
+	Sessions    int    `json:"sessions"`
+	SocksAddr   string `json:"socks_addr"`
+	ExitIP      string `json:"exit_ip"`
+	ExitCountry string `json:"exit_country"`
+	ExitNick    string `json:"exit_nickname"`
+}
+
+func instanceViews(p *pool.Pool) []instanceView {
+	instances := p.Fleet().Instances()
+	counts := p.SessionsPerInstance()
+
+	out := make([]instanceView, 0, len(instances))
+	for _, inst := range instances {
+		// The cache is kept current by the pool's refresh loop; reading it here
+		// keeps API latency off the control port.
+		node := inst.ExitNode()
+		out = append(out, instanceView{
+			ID:          inst.Index(),
+			Ready:       inst.Ready(),
+			Running:     inst.Running(),
+			Bootstrap:   inst.Bootstrap(),
+			Pid:         inst.Pid(),
+			UptimeSecs:  int(time.Since(inst.StartedAt()).Seconds()),
+			Sessions:    counts[inst.Index()],
+			SocksAddr:   inst.Config().SocksAddr(),
+			ExitIP:      node.Address,
+			ExitCountry: node.Country,
+			ExitNick:    node.Nickname,
+		})
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

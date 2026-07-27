@@ -3,14 +3,33 @@ package tor
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func testInstance() InstanceConfig {
 	return InstanceConfig{
-		Index:         3,
-		DataDirectory: "/var/lib/tor/3",
-		SocksPort:     19003,
-		ControlPort:   19503,
+		Index:               3,
+		DataDirectory:       "/var/lib/tor/3",
+		SocksPort:           19003,
+		ControlPort:         19503,
+		MaxCircuitDirtiness: time.Hour,
+	}
+}
+
+func TestTorrcHoldsCircuitsForStickiness(t *testing.T) {
+	// Without this, tor's 10-minute default would swap the exit IP under a
+	// session that never asked to rotate.
+	rc := testInstance().Torrc()
+	if !strings.Contains(rc, "MaxCircuitDirtiness 3600") {
+		t.Errorf("circuit lifetime not rendered in seconds:\n%s", rc)
+	}
+}
+
+func TestTorrcOmitsCircuitLifetimeWhenUnset(t *testing.T) {
+	ic := testInstance()
+	ic.MaxCircuitDirtiness = 0
+	if strings.Contains(ic.Torrc(), "MaxCircuitDirtiness") {
+		t.Error("an unset lifetime should leave tor's default in place")
 	}
 }
 
