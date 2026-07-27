@@ -13,7 +13,12 @@ import (
 	"time"
 
 	"github.com/lncrawl/tor-pool/internal/config"
+	"github.com/lncrawl/tor-pool/internal/pool"
 )
+
+// Outcome re-exports the pool's connection outcome so callers of this package
+// need only one import.
+type Outcome = pool.Outcome
 
 // Router is the pool behaviour the listeners depend on. Keeping it an interface
 // means the proxy layer can be tested without a live fleet.
@@ -21,7 +26,7 @@ type Router interface {
 	// Route returns the SOCKS address of the instance this session should use.
 	RouteAddr(sessionKey string) (instance int, socksAddr string, err error)
 	// Finish records the outcome of a completed connection.
-	Finish(sessionKey string, bytesUp, bytesDown int64, failed bool)
+	Finish(sessionKey string, out Outcome)
 	// RecordTransportFailure attributes a transport-level failure to an
 	// instance, independent of any session.
 	RecordTransportFailure(instance int, reason string)
@@ -142,17 +147,19 @@ func (s *Server) handleSocks(ctx context.Context, client net.Conn) {
 		return
 	}
 
+	dialStart := time.Now()
 	upstream, err := dialThroughInstance(ctx, socksAddr, req.target)
 	if err != nil {
 		s.reportDialFailure(instance, key, req.target, err)
 		writeSocksReply(client, dialFailureReply(err))
 		return
 	}
+	latency := time.Since(dialStart)
 	defer func() { _ = upstream.Close() }()
 
 	writeSocksReply(client, replySuccess)
 	s.sampleExitSoon(ctx, instance)
-	s.finish(key, instance, req.target, relay(client, upstream))
+	s.finish(key, instance, req.target, latency, relay(client, upstream))
 }
 
 // sampleExitSoon schedules an exit-relay sample inside this connection's
@@ -228,7 +235,7 @@ func (s *Server) reportDialFailure(instance int, key string, t target, err error
 	s.log.Info("upstream dial failed",
 		"session", key, "instance", instance, "target", t.String(), "error", err)
 	s.router.RecordTransportFailure(instance, reason)
-	s.router.Finish(key, 0, 0, true)
+	s.router.Finish(key, Outcome{Instance: instance, Failed: true})
 }
 
 // dialFailureReply maps an upstream failure onto the SOCKS reply code the client
@@ -243,12 +250,18 @@ func dialFailureReply(err error) byte {
 }
 
 // finish records a completed connection.
-func (s *Server) finish(key string, instance int, t target, res relayResult) {
+func (s *Server) finish(key string, instance int, t target, latency time.Duration, res relayResult) {
 	failed := res.Err != nil
 	if failed {
 		s.log.Debug("relay ended with error",
 			"session", key, "instance", instance, "target", t.String(), "error", res.Err)
 		s.router.RecordTransportFailure(instance, "relay_error")
 	}
-	s.router.Finish(key, res.BytesUp, res.BytesDown, failed)
+	s.router.Finish(key, Outcome{
+		Instance:  instance,
+		BytesUp:   res.BytesUp,
+		BytesDown: res.BytesDown,
+		Latency:   latency,
+		Failed:    failed,
+	})
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // handleHTTP serves one client on the HTTP proxy port, handling both CONNECT
@@ -43,12 +44,14 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn) {
 		return
 	}
 
+	dialStart := time.Now()
 	upstream, err := dialThroughInstance(ctx, socksAddr, tgt)
 	if err != nil {
 		s.reportDialFailure(instance, key, tgt, err)
 		writeHTTPError(client, http.StatusBadGateway, "tor could not reach the destination")
 		return
 	}
+	latency := time.Since(dialStart)
 	defer func() { _ = upstream.Close() }()
 
 	if req.Method == http.MethodConnect {
@@ -58,7 +61,7 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn) {
 	} else if err := forwardRequest(upstream, req); err != nil {
 		s.log.Debug("forwarding request failed", "session", key, "error", err)
 		s.router.RecordTransportFailure(instance, "request_write_error")
-		s.router.Finish(key, 0, 0, true)
+		s.router.Finish(key, Outcome{Instance: instance, Failed: true})
 		return
 	}
 
@@ -76,7 +79,7 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn) {
 		}
 	}
 
-	s.finish(key, instance, tgt, relay(client, upstream))
+	s.finish(key, instance, tgt, latency, relay(client, upstream))
 }
 
 // httpTarget derives the destination from a proxy request.

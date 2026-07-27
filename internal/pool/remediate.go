@@ -3,8 +3,10 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/lncrawl/tor-pool/internal/stats"
 	"github.com/lncrawl/tor-pool/internal/tor"
 )
 
@@ -22,6 +24,8 @@ func (p *Pool) RecordFailure(instance int, source FailureSource, reason string) 
 
 	p.log.Warn("instance quarantined",
 		"instance", instance, "source", source, "reason", reason)
+	p.events.Instance(stats.EventQuarantine, instance,
+		"quarantined after repeated failures", string(source)+": "+reason)
 
 	// Sessions are unpinned now rather than when they next ask, so a caller
 	// never gets handed an instance already known to be bad.
@@ -58,15 +62,17 @@ func (p *Pool) startRemediation(instance int) {
 			delete(p.remediating, instance)
 			p.healthMu.Unlock()
 		}()
-		p.remediate(p.remediationCtx(), instance)
+		p.remediate(p.poolCtx(), instance)
 	}()
 }
 
-// remediationCtx returns the context remediation runs under.
+// poolCtx returns the context every lifecycle operation runs under.
 //
-// It is the pool's own lifetime, not a request's: a restart must not be
-// abandoned halfway because the client that triggered it went away.
-func (p *Pool) remediationCtx() context.Context {
+// It is the pool's own lifetime, never a request's. A restart, a resize or a
+// NEWNYM outlives the HTTP call that asked for it: tying them to the request
+// means the work is cancelled the moment the response is written, which
+// silently leaves instances half-started or tor stopped and not restarted.
+func (p *Pool) poolCtx() context.Context {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 	if p.ctx != nil {
@@ -87,6 +93,8 @@ func (p *Pool) remediate(ctx context.Context, instance int) {
 	rung, delay := h.nextRung(time.Now(), p.policy())
 
 	log := p.log.With("instance", instance, "rung", rung.String())
+	p.events.Instance(stats.EventRemediation, instance,
+		"remediating with "+rung.String(), "")
 	if delay > 0 {
 		log.Warn("instance keeps failing, backing off", "delay", delay)
 		select {
@@ -126,6 +134,8 @@ func (p *Pool) remediate(ctx context.Context, instance int) {
 
 	h.remediated(time.Now())
 	log.Info("instance back in service on probation")
+	p.events.Instance(stats.EventRemediation, instance,
+		"back in service on probation after "+rung.String(), "")
 }
 
 // superviseProcesses restarts tor processes that have died on their own.
@@ -153,6 +163,7 @@ func (p *Pool) superviseProcesses(ctx context.Context) {
 		}
 
 		p.log.Warn("tor process died, restarting", "instance", index)
+		p.events.Instance(stats.EventInstance, index, "tor process died, restarting", "")
 		p.healthFor(index).markStarting()
 		p.sessions.unpinInstance(index)
 
@@ -186,6 +197,7 @@ func (p *Pool) QuarantineInstance(instance int) bool {
 	p.healthFor(instance).quarantine(time.Now())
 	moved := p.sessions.unpinInstance(instance)
 	p.log.Info("instance quarantined by request", "instance", instance, "sessions_moved", moved)
+	p.events.Instance(stats.EventQuarantine, instance, "quarantined by request", "")
 	return true
 }
 
@@ -196,16 +208,20 @@ func (p *Pool) ReleaseInstance(instance int) bool {
 	}
 	p.healthFor(instance).release()
 	p.log.Info("instance released", "instance", instance)
+	p.events.Instance(stats.EventQuarantine, instance, "released back into rotation", "")
 	return true
 }
 
 // RotateInstance asks an instance for a fresh circuit.
-func (p *Pool) RotateInstance(ctx context.Context, instance int) error {
+//
+// Takes no context: NEWNYM waits out tor's cooldown, which can outlast the
+// request that asked for it.
+func (p *Pool) RotateInstance(instance int) error {
 	inst, ok := p.fleet.Get(instance)
 	if !ok {
 		return errors.New("no such instance")
 	}
-	if err := inst.Newnym(ctx); err != nil {
+	if err := inst.Newnym(p.poolCtx()); err != nil {
 		return err
 	}
 	if _, err := inst.RefreshExitNode(); err != nil {
@@ -216,7 +232,7 @@ func (p *Pool) RotateInstance(ctx context.Context, instance int) error {
 
 // RestartInstance restarts an instance's tor process, optionally wiping its
 // state for a completely new identity.
-func (p *Pool) RestartInstance(ctx context.Context, instance int, wipe bool) error {
+func (p *Pool) RestartInstance(instance int, wipe bool) error {
 	inst, ok := p.fleet.Get(instance)
 	if !ok {
 		return errors.New("no such instance")
@@ -226,11 +242,16 @@ func (p *Pool) RestartInstance(ctx context.Context, instance int, wipe bool) err
 	h.markStarting()
 	p.sessions.unpinInstance(instance)
 
-	if err := inst.Restart(ctx, wipe); err != nil {
+	if err := inst.Restart(p.poolCtx(), wipe); err != nil {
 		return err
 	}
 	h.release()
 	p.log.Info("instance restarted", "instance", instance, "wiped", wipe)
+	detail := "state kept"
+	if wipe {
+		detail = "state wiped"
+	}
+	p.events.Instance(stats.EventRestart, instance, "restarted by request", detail)
 	return nil
 }
 
@@ -238,11 +259,11 @@ func (p *Pool) RestartInstance(ctx context.Context, instance int, wipe bool) err
 //
 // Instances rotate concurrently but each waits out its own NEWNYM cooldown, so
 // this can take up to that cooldown to finish.
-func (p *Pool) RotateAll(ctx context.Context) int {
+func (p *Pool) RotateAll() int {
 	instances := p.fleet.Instances()
 	for _, inst := range instances {
 		go func(index int) {
-			if err := p.RotateInstance(ctx, index); err != nil && !errors.Is(err, context.Canceled) {
+			if err := p.RotateInstance(index); err != nil && !errors.Is(err, context.Canceled) {
 				p.log.Warn("rotate failed", "instance", index, "error", err)
 			}
 		}(inst.Index())
@@ -254,11 +275,14 @@ func (p *Pool) RotateAll(ctx context.Context) int {
 //
 // Shrinking retires the highest-numbered instances and unpins their sessions, so
 // callers move rather than fail.
-func (p *Pool) Resize(ctx context.Context, size int) error {
+func (p *Pool) Resize(size int) error {
 	if size < 1 {
 		return errors.New("pool size must be at least 1")
 	}
 
+	// New instances take tens of seconds to bootstrap, far longer than the
+	// request that asked for them.
+	ctx := p.poolCtx()
 	current := p.fleet.Size()
 	switch {
 	case size > current:
@@ -268,6 +292,8 @@ func (p *Pool) Resize(ctx context.Context, size int) error {
 			}
 		}
 		p.log.Info("pool grown", "from", current, "to", size)
+		p.events.Add(stats.Event{Type: stats.EventResize,
+			Message: fmt.Sprintf("pool grown from %d to %d", current, size)})
 
 	case size < current:
 		instances := p.fleet.Instances()
@@ -280,6 +306,8 @@ func (p *Pool) Resize(ctx context.Context, size int) error {
 			p.forgetInstance(index)
 		}
 		p.log.Info("pool shrunk", "from", current, "to", size)
+		p.events.Add(stats.Event{Type: stats.EventResize,
+			Message: fmt.Sprintf("pool shrunk from %d to %d", current, size)})
 	}
 	return nil
 }

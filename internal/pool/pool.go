@@ -3,13 +3,26 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/lncrawl/tor-pool/internal/config"
+	"github.com/lncrawl/tor-pool/internal/stats"
 	"github.com/lncrawl/tor-pool/internal/tor"
 )
+
+// Outcome is what a completed connection did.
+type Outcome struct {
+	Instance  int
+	BytesUp   int64
+	BytesDown int64
+	// Latency is the time to establish the connection through tor, not the
+	// duration of the transfer. It is the part that reflects instance health.
+	Latency time.Duration
+	Failed  bool
+}
 
 // ErrNoInstance means nothing in the pool can currently carry traffic.
 //
@@ -20,6 +33,9 @@ var ErrNoInstance = errors.New("pool: no healthy instance available")
 const (
 	// sweepInterval is how often idle sessions are collected.
 	sweepInterval = 30 * time.Second
+
+	// eventLogSize is how many audit entries are retained in memory.
+	eventLogSize = 2000
 
 	// superviseInterval is how often dead tor processes are looked for.
 	superviseInterval = 10 * time.Second
@@ -39,6 +55,9 @@ type Pool struct {
 	fleet    *tor.Fleet
 	sessions *sessions
 	log      *slog.Logger
+
+	stats  *stats.Collector
+	events *stats.EventLog
 
 	sampleMu       sync.Mutex
 	lastExitSample map[int]time.Time
@@ -63,6 +82,8 @@ func New(cfg *config.Config, fleet *tor.Fleet, log *slog.Logger) *Pool {
 		sessions:       newSessions(cfg.SessionTTL, cfg.MaxSessions),
 		log:            log,
 		lastExitSample: make(map[int]time.Time),
+		stats:          stats.NewCollector(cfg.HistoryResolution, cfg.HistoryWindow),
+		events:         stats.NewEventLog(eventLogSize),
 		health:         make(map[int]*health),
 		remediating:    make(map[int]bool),
 	}
@@ -146,6 +167,7 @@ func (p *Pool) Run(ctx context.Context) {
 			}
 		case <-exits.C:
 			p.RefreshExitNodes()
+			p.stats.RecordRoutable(p.RoutableCount())
 		case <-supervise.C:
 			p.superviseProcesses(ctx)
 		}
@@ -216,15 +238,20 @@ func (p *Pool) assign(key string, now time.Time, exclude int) (*tor.Instance, er
 // A failure is not scored here: whoever detected it already attributed it to a
 // specific instance, and doing it twice would halve the effective quarantine
 // threshold.
-func (p *Pool) Finish(key string, bytesUp, bytesDown int64, failed bool) {
-	p.sessions.finish(key, bytesUp, bytesDown, failed)
-	if failed {
+func (p *Pool) Finish(key string, out Outcome) {
+	p.sessions.finish(key, out.BytesUp, out.BytesDown, out.Failed)
+	p.stats.RecordRequest(out.Instance, out.BytesUp, out.BytesDown, out.Latency, out.Failed)
+	if out.Failed {
 		return
 	}
-	if sess, ok := p.sessions.lookup(key); ok {
-		p.RecordSuccess(sess.Instance)
-	}
+	p.RecordSuccess(out.Instance)
 }
+
+// Stats exposes the collector for reporting.
+func (p *Pool) Stats() *stats.Collector { return p.stats }
+
+// Events exposes the audit log.
+func (p *Pool) Events() *stats.EventLog { return p.events }
 
 // RotateSession moves a session to a different instance.
 //
@@ -233,7 +260,7 @@ func (p *Pool) Finish(key string, bytesUp, bytesDown int64, failed bool) {
 // instance costs nothing. newnym additionally asks the vacated instance for a
 // fresh circuit, which is the slow path and only worth it when the caller
 // believes that exit itself is burnt.
-func (p *Pool) RotateSession(ctx context.Context, key string, newnym bool) (*tor.Instance, error) {
+func (p *Pool) RotateSession(key string, newnym bool) (*tor.Instance, error) {
 	previous := -1
 	if sess, ok := p.sessions.lookup(key); ok {
 		previous = sess.Instance
@@ -248,6 +275,7 @@ func (p *Pool) RotateSession(ctx context.Context, key string, newnym bool) (*tor
 		if old, ok := p.fleet.Get(previous); ok {
 			// Rotating the vacated instance can block on tor's cooldown, so it
 			// must not hold up the caller's next request.
+			ctx := p.poolCtx()
 			go func() {
 				if err := old.Newnym(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					p.log.Warn("newnym on vacated instance failed",
@@ -259,6 +287,8 @@ func (p *Pool) RotateSession(ctx context.Context, key string, newnym bool) (*tor
 
 	p.log.Info("session rotated", "session", key,
 		"from_instance", previous, "to_instance", inst.Index(), "newnym", newnym)
+	p.events.Session(stats.EventRotate, key, inst.Index(),
+		fmt.Sprintf("session rotated from instance %d", previous))
 	return inst, nil
 }
 
