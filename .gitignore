@@ -7,7 +7,7 @@ coverage.*
 
 # Node / dashboard build
 node_modules/
-web/dist/
+
 web/.vite/
 *.tsbuildinfo
 
@@ -31,3 +31,8 @@ tor_data/
 
 # Playwright output that is not committed on purpose
 web/test-results/
+
+# Built dashboard, embedded at build time. The placeholder index.html is
+# committed so `go build` works without running npm.
+internal/server/dist/*
+!internal/server/dist/index.html

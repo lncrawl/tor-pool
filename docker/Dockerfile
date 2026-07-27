@@ -1,6 +1,22 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------------------
+# Build the dashboard. Its output is embedded into the Go binary, so this stage
+# has to run first and the published image always ships the real UI rather than
+# the committed placeholder.
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS web
+
+WORKDIR /web
+
+# Manifests first so the dependency install is cached independently of source.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
 # Build the Go binary. CGO is off so the result runs on a bare Alpine layer
 # without a libc shim.
 # ---------------------------------------------------------------------------
@@ -20,6 +36,9 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
+
+# Replace the committed placeholder with the real bundle before go:embed runs.
+COPY --from=web /internal/server/dist ./internal/server/dist
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

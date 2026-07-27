@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tor-pool</title>
+<body style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem">
+  <h1>tor-pool</h1>
+  <p>
+    This binary was built without the dashboard. The API is still fully available:
+  </p>
+  <ul>
+    <li><code>/api/pool</code>, <code>/api/instances</code>, <code>/api/sessions</code>, <code>/api/events</code></li>
+    <li><code>/api/stream</code> — live updates over SSE</li>
+    <li><code>/metrics</code>, <code>/health</code></li>
+  </ul>
+  <p>
+    Build it with <code>npm --prefix web ci &amp;&amp; npm --prefix web run build</code>,
+    or use the published image, which always includes it.
+  </p>
+</body>

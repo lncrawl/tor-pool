@@ -210,20 +210,41 @@ func TestEventsRespectsLimit(t *testing.T) {
 	}
 }
 
-func TestRootExplainsItself(t *testing.T) {
+func TestRootServesTheDashboard(t *testing.T) {
 	s := newTestServer(t)
 	rec := do(t, s, http.MethodGet, "/", "")
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "/api/pool") {
-		t.Error("the root should point at the API")
+	if !strings.Contains(rec.Body.String(), "<title>tor-pool</title>") {
+		t.Errorf("root did not serve the dashboard document, got: %.120s", rec.Body.String())
+	}
+	// index.html must never be cached, or a redeploy keeps serving the old
+	// bundle from the browser's cache.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
 	}
 }
 
-func TestUnknownPathIs404(t *testing.T) {
+func TestUnknownPathFallsBackToTheDashboard(t *testing.T) {
+	// A bookmarked deep link is the dashboard's job, not a 404 — the router
+	// resolves it client-side.
 	s := newTestServer(t)
-	if got := do(t, s, http.MethodGet, "/nope", "").Code; got != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", got)
+	rec := do(t, s, http.MethodGet, "/instances", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<title>tor-pool</title>") {
+		t.Error("a deep link should serve the dashboard document")
+	}
+}
+
+func TestUnknownAPIPathIs404(t *testing.T) {
+	// The SPA fallback must not swallow a mistyped API route and hand back
+	// HTML with a 200.
+	s := newTestServer(t)
+	rec := do(t, s, http.MethodGet, "/api/nope", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 — API paths must not fall through to the SPA", rec.Code)
 	}
 }

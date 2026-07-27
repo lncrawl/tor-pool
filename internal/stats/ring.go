@@ -79,6 +79,12 @@ func (r *ring) advance(now time.Time) *bucket {
 		return &r.buckets[r.head]
 	}
 
+	// Gauges are carried into the buckets we skip over. Counters are per-bucket
+	// and correctly start at zero, but a gauge left at zero would read as "no
+	// instances were routable" for every quiet second, which is a different
+	// claim entirely — and drew a sawtooth on the dashboard.
+	carried := r.buckets[r.head].routable
+
 	// A long idle gap must not be walked bucket by bucket.
 	if steps >= len(r.buckets) {
 		for i := range r.buckets {
@@ -86,12 +92,16 @@ func (r *ring) advance(now time.Time) *bucket {
 		}
 		r.head = 0
 		r.buckets[0].reset(slot)
+		r.buckets[0].routable = carried
 		return &r.buckets[0]
 	}
 
-	for range steps {
+	for i := steps; i > 0; i-- {
 		r.head = (r.head + 1) % len(r.buckets)
-		r.buckets[r.head].reset(slot)
+		// Each skipped bucket covers its own instant, not the newest one.
+		// Stamping them all with `slot` collapsed them onto one x position.
+		r.buckets[r.head].reset(slot.Add(-time.Duration(i-1) * r.resolution))
+		r.buckets[r.head].routable = carried
 	}
 	return &r.buckets[r.head]
 }
