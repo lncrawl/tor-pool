@@ -27,6 +27,13 @@ linters:
       disabled-checks:
         # Fires on the small helper wrappers around env parsing.
         - ifElseChain
+      settings:
+        hugeParam:
+          # Setup structs (InstanceConfig, FleetOptions) are copied once per
+          # instance at construction, never per request, so the default 80-byte
+          # warning only produces noise here. Anything genuinely large enough to
+          # matter — the top-level Config — still trips this.
+          sizeThreshold: 256
 
   exclusions:
     rules:

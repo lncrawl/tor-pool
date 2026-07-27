@@ -1,0 +1,55 @@
+services:
+  tor-pool:
+    # Published image, or build locally with: docker compose up -d --build
+    image: ghcr.io/lncrawl/tor-pool:latest
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    container_name: tor-pool
+    restart: unless-stopped
+
+    environment:
+      # How many tor instances to run. Each one is an independent exit identity.
+      POOL_SIZE: '${POOL_SIZE:-5}'
+
+      # Serve traffic as soon as this many instances have bootstrapped, instead
+      # of waiting for the whole pool.
+      MIN_READY: '${MIN_READY:-1}'
+
+      # How a caller with no SOCKS credentials is identified: ip | random | shared
+      DEFAULT_SESSION: '${DEFAULT_SESSION:-ip}'
+
+      # Idle sessions are unpinned after this long.
+      SESSION_TTL: '${SESSION_TTL:-10m}'
+
+      LOG_LEVEL: '${LOG_LEVEL:-info}'
+
+    ports:
+      # SOCKS5 proxy — the sticky endpoint your scraper connects to. The SOCKS5
+      # username is the session key.
+      - '${SOCKS_PUBLISH:-127.0.0.1:9250}:9250'
+
+      # HTTP/HTTPS CONNECT proxy, for tools without SOCKS support.
+      - '${HTTP_PUBLISH:-127.0.0.1:9251}:9251'
+
+      # Dashboard and REST API. Bound to loopback on the host because there is
+      # no authentication: anyone who can reach this port can restart or drain
+      # instances. Widen this only behind your own auth layer.
+      - '${API_PUBLISH:-127.0.0.1:8080}:8080'
+
+    # Persist tor state so restarts re-bootstrap from a cached consensus
+    # instead of from scratch.
+    volumes:
+      - tor_data:/var/lib/tor
+
+    healthcheck:
+      # Reports unhealthy while no instance can carry traffic.
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:8080/health']
+      interval: 30s
+      timeout: 5s
+      # Generous: a cold pool has to bootstrap over Tor before it is usable.
+      start_period: 120s
+      retries: 3
+
+volumes:
+  tor_data:

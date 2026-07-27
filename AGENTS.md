@@ -93,8 +93,12 @@ isn't.
    *new* connections. Clients holding keep-alives must drop their pooled connections after
    rotating or they keep exiting through the old instance — this is the single most common
    integration bug, and it is why `scraper` resets its adapters after `rotate()`.
-5. **`NEWNYM` has a tor-enforced cooldown.** Read the remaining wait from the control port;
-   never sleep a hardcoded interval and never assume the signal took effect immediately.
+5. **`NEWNYM` has a tor-enforced cooldown and tor will not tell you how much is left.** A signal
+   sent inside the cooldown answers `250 OK` and is then silently coalesced, so rotation appears
+   to work while the exit IP never changes. The cooldown is therefore tracked client-side, from
+   the last `NEWNYM` *this connection* sent — which is why the pool keeps one long-lived control
+   connection per instance instead of dialling per command. Use `Control.Newnym`, which waits it
+   out, rather than `Signal("NEWNYM")` directly.
 6. **Session keys are untrusted input.** They arrive as a SOCKS5 username or a
    `Proxy-Authorization` header from whoever can reach the proxy port. Bound the session table
    (`MAX_SESSIONS`), and never interpolate a key into a log message, a torrc, or a shell command
