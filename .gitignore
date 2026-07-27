@@ -1,0 +1,33 @@
+# Go
+/torpool
+/dist/
+*.test
+*.out
+coverage.*
+
+# Node / dashboard build
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+*.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local tor state (bind-mounted volume during development)
+tor_data/
+
+# Playwright output that is not committed on purpose
+web/test-results/
