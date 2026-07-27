@@ -4,23 +4,30 @@
 # Build the dashboard. Its output is embedded into the Go binary, so this stage
 # has to run first and the published image always ships the real UI rather than
 # the committed placeholder.
+#
+# --platform=$BUILDPLATFORM pins this to the native builder. The output is
+# plain JS and HTML, identical for every target arch, so running it once per
+# architecture under QEMU emulation would multiply the slowest step in the
+# build for no difference in output.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 
 WORKDIR /web
 
 # Manifests first so the dependency install is cached independently of source.
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 
 COPY web/ ./
 RUN npm run build
 
 # ---------------------------------------------------------------------------
 # Build the Go binary. CGO is off so the result runs on a bare Alpine layer
-# without a libc shim.
+# without a libc shim — and so this stage can also stay on the native builder
+# and cross-compile via GOOS/GOARCH. Emulating the compiler instead would make
+# an arm64 build several times slower for a byte-identical result.
 # ---------------------------------------------------------------------------
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
 ARG VERSION=dev
 ARG TARGETOS
@@ -32,7 +39,7 @@ WORKDIR /src
 # the source. There are no third-party modules today; this keeps it that way
 # cheaply if any are added.
 COPY go.mod ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
@@ -40,7 +47,10 @@ COPY internal ./internal
 # Replace the committed placeholder with the real bundle before go:embed runs.
 COPY --from=web /internal/server/dist ./internal/server/dist
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
+# The cache is keyed by target arch so the two cross-compiles do not evict
+# each other's objects on every build.
+RUN --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETOS}-${TARGETARCH} \
+    --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/torpool ./cmd/torpool
