@@ -21,6 +21,9 @@ const (
 	// sweepInterval is how often idle sessions are collected.
 	sweepInterval = 30 * time.Second
 
+	// superviseInterval is how often dead tor processes are looked for.
+	superviseInterval = 10 * time.Second
+
 	// exitRefreshInterval is how often each instance's exit relay is re-read.
 	//
 	// This has to be polled rather than cached once: tor retires circuits on its
@@ -39,6 +42,17 @@ type Pool struct {
 
 	sampleMu       sync.Mutex
 	lastExitSample map[int]time.Time
+
+	healthMu sync.Mutex
+	health   map[int]*health
+
+	// ctx is the pool's own lifetime, captured by Run. Remediation uses it so a
+	// restart is not abandoned when the request that triggered it goes away.
+	ctx context.Context
+
+	// remediating guards against two remediations running on one instance at
+	// once, which could restart tor underneath itself.
+	remediating map[int]bool
 }
 
 // New builds a pool over an existing fleet.
@@ -49,7 +63,60 @@ func New(cfg *config.Config, fleet *tor.Fleet, log *slog.Logger) *Pool {
 		sessions:       newSessions(cfg.SessionTTL, cfg.MaxSessions),
 		log:            log,
 		lastExitSample: make(map[int]time.Time),
+		health:         make(map[int]*health),
+		remediating:    make(map[int]bool),
 	}
+}
+
+// policy derives the health tuning from configuration.
+func (p *Pool) policy() healthPolicy {
+	return healthPolicy{
+		Window:           p.cfg.FailureWindow,
+		MaxInWindow:      p.cfg.QuarantineFailures,
+		MaxConsecutive:   p.cfg.QuarantineConsecutive,
+		EscalationWindow: p.cfg.EscalationWindow,
+		Backoff:          p.cfg.RemediationBackoff,
+		MaxBackoff:       p.cfg.MaxRemediationBackoff,
+	}
+}
+
+// healthFor returns an instance's health record, creating it on first sight.
+func (p *Pool) healthFor(instance int) *health {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+
+	h, ok := p.health[instance]
+	if !ok {
+		h = newHealth()
+		p.health[instance] = h
+	}
+	return h
+}
+
+// Health returns the reportable health of every instance.
+func (p *Pool) Health() map[int]HealthView {
+	now := time.Now()
+	window := p.cfg.FailureWindow
+
+	instances := p.fleet.Instances()
+	out := make(map[int]HealthView, len(instances))
+	for _, inst := range instances {
+		out[inst.Index()] = p.healthFor(inst.Index()).snapshot(now, window)
+	}
+	return out
+}
+
+// forgetInstance drops health state for a retired instance so the maps do not
+// grow across resizes.
+func (p *Pool) forgetInstance(instance int) {
+	p.healthMu.Lock()
+	delete(p.health, instance)
+	delete(p.remediating, instance)
+	p.healthMu.Unlock()
+
+	p.sampleMu.Lock()
+	delete(p.lastExitSample, instance)
+	p.sampleMu.Unlock()
 }
 
 // Fleet exposes the underlying fleet for lifecycle operations.
@@ -58,10 +125,16 @@ func (p *Pool) Fleet() *tor.Fleet { return p.fleet }
 // Run maintains the pool until ctx is cancelled: currently the idle-session
 // sweep, and later the health and remediation loops.
 func (p *Pool) Run(ctx context.Context) {
+	p.healthMu.Lock()
+	p.ctx = ctx
+	p.healthMu.Unlock()
+
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
 	exits := time.NewTicker(exitRefreshInterval)
 	defer exits.Stop()
+	supervise := time.NewTicker(superviseInterval)
+	defer supervise.Stop()
 
 	for {
 		select {
@@ -73,6 +146,8 @@ func (p *Pool) Run(ctx context.Context) {
 			}
 		case <-exits.C:
 			p.RefreshExitNodes()
+		case <-supervise.C:
+			p.superviseProcesses(ctx)
 		}
 	}
 }
@@ -137,8 +212,18 @@ func (p *Pool) assign(key string, now time.Time, exclude int) (*tor.Instance, er
 }
 
 // Finish records the outcome of a request against its session.
+//
+// A failure is not scored here: whoever detected it already attributed it to a
+// specific instance, and doing it twice would halve the effective quarantine
+// threshold.
 func (p *Pool) Finish(key string, bytesUp, bytesDown int64, failed bool) {
 	p.sessions.finish(key, bytesUp, bytesDown, failed)
+	if failed {
+		return
+	}
+	if sess, ok := p.sessions.lookup(key); ok {
+		p.RecordSuccess(sess.Instance)
+	}
 }
 
 // RotateSession moves a session to a different instance.
@@ -188,6 +273,7 @@ func (p *Pool) ReportFailure(key, reason string) (instance int, ok bool) {
 	}
 	p.log.Info("client reported failure",
 		"session", key, "instance", instance, "reason", reason)
+	p.RecordFailure(instance, SourceClient, reason)
 	return instance, true
 }
 
@@ -199,6 +285,14 @@ func (p *Pool) Sessions() []Session { return p.sessions.list() }
 
 // Session returns one session by key.
 func (p *Pool) Session(key string) (Session, bool) { return p.sessions.lookup(key) }
+
+// RoutableCount reports how many instances can actually take traffic right now.
+//
+// This is not the same as the number of bootstrapped processes: a quarantined
+// instance is alive and fully bootstrapped but must not be routed to. Liveness
+// checks have to use this one, or a pool with everything quarantined reports
+// itself healthy while refusing every request.
+func (p *Pool) RoutableCount() int { return len(p.readyInstances()) }
 
 // SessionCount reports how many sessions are pinned.
 func (p *Pool) SessionCount() int { return p.sessions.count() }
@@ -216,11 +310,22 @@ func (p *Pool) DrainInstance(instance int) int {
 }
 
 // readyInstances returns the instances that can currently carry traffic.
+//
+// An instance must be both bootstrapped *and* in a routable health state: a
+// quarantined instance is alive and would happily serve, which is exactly why
+// the health gate has to be checked here and not left to the process state.
 func (p *Pool) readyInstances() []*tor.Instance {
+	now := time.Now()
 	all := p.fleet.Instances()
+
 	ready := make([]*tor.Instance, 0, len(all))
 	for _, inst := range all {
-		if inst.Ready() {
+		if !inst.Ready() {
+			continue
+		}
+		h := p.healthFor(inst.Index())
+		h.markReady()
+		if h.routable(now) {
 			ready = append(ready, inst)
 		}
 	}

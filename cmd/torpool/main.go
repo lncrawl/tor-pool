@@ -134,8 +134,10 @@ func statusHandler(p *pool.Pool, cfg *config.Config) http.Handler {
 	fleet := p.Fleet()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		if fleet.ReadyCount() == 0 {
-			http.Error(w, "no ready instances", http.StatusServiceUnavailable)
+		// Routable, not merely bootstrapped: an all-quarantined pool is alive
+		// but cannot serve a single request, and must say so.
+		if p.RoutableCount() == 0 {
+			http.Error(w, "no routable instances", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -151,11 +153,67 @@ func statusHandler(p *pool.Pool, cfg *config.Config) http.Handler {
 			"version":    version,
 			"size":       fleet.Size(),
 			"ready":      fleet.ReadyCount(),
+			"routable":   p.RoutableCount(),
 			"sessions":   p.SessionCount(),
 			"pool_size":  cfg.PoolSize,
 			"socks_port": cfg.SocksPort,
 			"http_port":  cfg.HTTPPort,
 		})
+	})
+
+	mux.HandleFunc("POST /api/instances/{id}/rotate", instanceAction(p,
+		func(r *http.Request, id int) error { return p.RotateInstance(r.Context(), id) }))
+
+	mux.HandleFunc("POST /api/instances/{id}/restart", instanceAction(p,
+		func(r *http.Request, id int) error {
+			// Wiping is the default: a restart that keeps its guards and cached
+			// consensus is rarely what an operator means by "restart this".
+			wipe := r.URL.Query().Get("wipe") != "false"
+			return p.RestartInstance(r.Context(), id, wipe)
+		}))
+
+	mux.HandleFunc("POST /api/instances/{id}/quarantine", instanceAction(p,
+		func(_ *http.Request, id int) error {
+			if !p.QuarantineInstance(id) {
+				return errNoSuchInstance
+			}
+			return nil
+		}))
+
+	mux.HandleFunc("POST /api/instances/{id}/release", instanceAction(p,
+		func(_ *http.Request, id int) error {
+			if !p.ReleaseInstance(id) {
+				return errNoSuchInstance
+			}
+			return nil
+		}))
+
+	mux.HandleFunc("POST /api/instances/{id}/drain", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "instance id must be a number", http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"instance": id, "sessions_moved": p.DrainInstance(id)})
+	})
+
+	mux.HandleFunc("POST /api/pool/rotate", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"rotating": p.RotateAll(r.Context())})
+	})
+
+	mux.HandleFunc("POST /api/pool/resize", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Size int `json:"size"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "body must be {\"size\": N}", http.StatusBadRequest)
+			return
+		}
+		if err := p.Resize(r.Context(), body.Size); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"size": p.Fleet().Size()})
 	})
 
 	mux.HandleFunc("GET /api/sessions", func(w http.ResponseWriter, _ *http.Request) {
@@ -226,24 +284,68 @@ func statusHandler(p *pool.Pool, cfg *config.Config) http.Handler {
 	return mux
 }
 
+// errNoSuchInstance is returned by an action addressed to an instance that has
+// been retired.
+var errNoSuchInstance = errors.New("no such instance")
+
+// instanceAction wraps the shared plumbing of the per-instance endpoints:
+// parsing the id, running the action, and reporting the instance's resulting
+// state.
+func instanceAction(p *pool.Pool, act func(*http.Request, int) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "instance id must be a number", http.StatusBadRequest)
+			return
+		}
+		if _, ok := p.Fleet().Get(id); !ok {
+			http.Error(w, errNoSuchInstance.Error(), http.StatusNotFound)
+			return
+		}
+
+		if err := act(r, id); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errNoSuchInstance) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+
+		inst, ok := p.Fleet().Get(id)
+		if !ok {
+			// A restart can retire and replace the instance underneath us.
+			writeJSON(w, map[string]any{"instance": id})
+			return
+		}
+		writeJSON(w, map[string]any{
+			"instance": id,
+			"state":    p.Health()[id].State,
+			"exit_ip":  inst.ExitNode().Address,
+		})
+	}
+}
+
 // instanceView is the interim JSON shape for an instance.
 type instanceView struct {
-	ID          int    `json:"id"`
-	Ready       bool   `json:"ready"`
-	Running     bool   `json:"running"`
-	Bootstrap   int    `json:"bootstrap"`
-	Pid         int    `json:"pid"`
-	UptimeSecs  int    `json:"uptime_secs"`
-	Sessions    int    `json:"sessions"`
-	SocksAddr   string `json:"socks_addr"`
-	ExitIP      string `json:"exit_ip"`
-	ExitCountry string `json:"exit_country"`
-	ExitNick    string `json:"exit_nickname"`
+	ID          int             `json:"id"`
+	Ready       bool            `json:"ready"`
+	Running     bool            `json:"running"`
+	Bootstrap   int             `json:"bootstrap"`
+	Pid         int             `json:"pid"`
+	UptimeSecs  int             `json:"uptime_secs"`
+	Sessions    int             `json:"sessions"`
+	SocksAddr   string          `json:"socks_addr"`
+	ExitIP      string          `json:"exit_ip"`
+	ExitCountry string          `json:"exit_country"`
+	ExitNick    string          `json:"exit_nickname"`
+	Health      pool.HealthView `json:"health"`
 }
 
 func instanceViews(p *pool.Pool) []instanceView {
 	instances := p.Fleet().Instances()
 	counts := p.SessionsPerInstance()
+	healthByID := p.Health()
 
 	out := make([]instanceView, 0, len(instances))
 	for _, inst := range instances {
@@ -262,6 +364,7 @@ func instanceViews(p *pool.Pool) []instanceView {
 			ExitIP:      node.Address,
 			ExitCountry: node.Country,
 			ExitNick:    node.Nickname,
+			Health:      healthByID[inst.Index()],
 		})
 	}
 	return out

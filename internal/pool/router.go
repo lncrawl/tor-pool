@@ -26,6 +26,7 @@ func (p *Pool) RouteAddr(sessionKey string) (instance int, socksAddr string, err
 // why ReportFailure exists alongside this.
 func (p *Pool) RecordTransportFailure(instance int, reason string) {
 	p.log.Debug("transport failure", "instance", instance, "reason", reason)
+	p.RecordFailure(instance, SourceTransport, reason)
 }
 
 // SampleExit re-reads an instance's exit relay, debounced per instance.
