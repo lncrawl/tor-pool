@@ -80,7 +80,11 @@ type health struct {
 	consecutive int
 	bySource    map[FailureSource]int64
 
-	rung            Rung
+	rung Rung
+	// rungAttempts is how many remediations have been spent at the current rung,
+	// which is what the backoff grows with. The lifetime count would have an
+	// instance that misbehaved a lot last week start today at maximum backoff.
+	rungAttempts    int
 	remediations    int64
 	lastRemediation time.Time
 	quarantinedAt   time.Time
@@ -179,6 +183,7 @@ func (h *health) nextRung(now time.Time, p healthPolicy) (Rung, time.Duration) {
 	defer h.mu.Unlock()
 
 	recurring := !h.lastRemediation.IsZero() && now.Sub(h.lastRemediation) < p.EscalationWindow
+	previous := h.rung
 	switch {
 	case !recurring:
 		h.rung = RungNewnym
@@ -187,12 +192,15 @@ func (h *health) nextRung(now time.Time, p healthPolicy) (Rung, time.Duration) {
 	default:
 		h.rung = RungBackoff
 	}
+	if h.rung != previous || !recurring {
+		h.rungAttempts = 0
+	}
 
 	var delay time.Duration
 	if h.rung == RungBackoff {
 		// Exponential in the number of remediations already spent at this rung.
 		delay = p.Backoff
-		for range h.remediations {
+		for range h.rungAttempts {
 			if delay >= p.MaxBackoff {
 				break
 			}
@@ -202,6 +210,7 @@ func (h *health) nextRung(now time.Time, p healthPolicy) (Rung, time.Duration) {
 	}
 
 	h.state = StateRemediating
+	h.rungAttempts++
 	h.remediations++
 	h.lastRemediation = now
 	h.availableAt = now.Add(delay)
@@ -260,6 +269,7 @@ func (h *health) release() {
 	h.failures = h.failures[:0]
 	h.consecutive = 0
 	h.rung = RungNewnym
+	h.rungAttempts = 0
 	h.availableAt = time.Time{}
 }
 

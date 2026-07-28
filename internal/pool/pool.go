@@ -38,6 +38,14 @@ var ErrNoInstance = errors.New("pool: no healthy instance available")
 // vanished instance made a stale request, it did not break the server.
 var ErrNoSuchInstance = errors.New("no such instance")
 
+// ErrInstanceNotReady means the operation needs a bootstrapped instance and this
+// one is not there yet.
+//
+// Rotating an instance that has no circuits is not merely pointless: it spends
+// the NEWNYM cooldown, so the rotation the operator asks for once it *is* ready
+// gets silently coalesced away.
+var ErrInstanceNotReady = errors.New("instance is not ready")
+
 const (
 	// sweepInterval is how often idle sessions are collected.
 	sweepInterval = 30 * time.Second
@@ -61,6 +69,17 @@ const (
 	// traffic is using. It is a local control-port query, not Tor traffic, so
 	// polling is cheap.
 	exitRefreshInterval = 5 * time.Second
+
+	// rotationGrace is how long after a rotation an instance stops being blamed
+	// for failures.
+	//
+	// A rotation throws away the circuits requests were about to use, so the
+	// requests that were mid-flight fail — through no fault of the instance.
+	// Scoring those was self-defeating: rotating a healthy instance a few times
+	// was enough to quarantine it, which triggered remediation, which rotated it
+	// again. Long enough to cover a circuit rebuild, short enough that a
+	// genuinely broken instance is still caught on its next request.
+	rotationGrace = 5 * time.Second
 )
 
 // Pool routes callers to tor instances and keeps them pinned.
@@ -87,9 +106,21 @@ type Pool struct {
 	// once, which could restart tor underneath itself.
 	remediating map[int]bool
 
+	// startAttempts counts consecutive failed launches per instance, so a second
+	// attempt can wipe the state a first one preserved.
+	startAttempts map[int]int
+
 	// rotating counts the rotations in flight per instance, so assignment can
 	// steer new callers away from an instance that has no circuits right now.
 	rotating map[int]int
+
+	// quietUntil is when an instance stops being excused for failures caused by
+	// its own rotation.
+	quietUntil map[int]time.Time
+
+	// sweeping guards a pool-wide rotation, which runs one instance at a time
+	// and would otherwise be started again by every click while it ran.
+	sweeping bool
 }
 
 // New builds a pool over an existing fleet.
@@ -104,7 +135,9 @@ func New(cfg *config.Config, fleet *tor.Fleet, log *slog.Logger) *Pool {
 		events:         stats.NewEventLog(eventLogSize),
 		health:         make(map[int]*health),
 		remediating:    make(map[int]bool),
+		startAttempts:  make(map[int]int),
 		rotating:       make(map[int]int),
+		quietUntil:     make(map[int]time.Time),
 	}
 }
 
@@ -152,28 +185,39 @@ func (p *Pool) forgetInstance(instance int) {
 	p.healthMu.Lock()
 	delete(p.health, instance)
 	delete(p.remediating, instance)
+	delete(p.startAttempts, instance)
 	delete(p.rotating, instance)
+	delete(p.quietUntil, instance)
 	p.healthMu.Unlock()
 
 	p.sampleMu.Lock()
 	delete(p.lastExitSample, instance)
 	p.sampleMu.Unlock()
+
+	// Indexes are reused, so a retired instance's counters would otherwise be
+	// inherited by whatever takes its place.
+	p.stats.Forget(instance)
 }
 
 // Fleet exposes the underlying fleet for lifecycle operations.
 func (p *Pool) Fleet() *tor.Fleet { return p.fleet }
 
-// Run maintains the pool until ctx is cancelled: currently the idle-session
-// sweep, and later the health and remediation loops.
+// Run maintains the pool until ctx is cancelled: the idle-session sweep, process
+// supervision, and the exit-relay poll.
+//
+// The exit poll runs in its own goroutine. It talks to every instance's control
+// port, and a control port can be busy for as long as tor's NEWNYM cooldown — so
+// sharing a loop with the session sweep and the process supervisor meant a
+// pool-wide rotation stopped both of them for tens of seconds.
 func (p *Pool) Run(ctx context.Context) {
 	p.healthMu.Lock()
 	p.ctx = ctx
 	p.healthMu.Unlock()
 
+	go p.runExitPoll(ctx)
+
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
-	exits := time.NewTicker(exitRefreshInterval)
-	defer exits.Stop()
 	supervise := time.NewTicker(superviseInterval)
 	defer supervise.Stop()
 
@@ -185,11 +229,25 @@ func (p *Pool) Run(ctx context.Context) {
 			if n := p.sessions.sweep(time.Now()); n > 0 {
 				p.log.Debug("idle sessions expired", "count", n)
 			}
-		case <-exits.C:
-			p.RefreshExitNodes()
-			p.stats.RecordRoutable(p.RoutableCount())
 		case <-supervise.C:
 			p.superviseProcesses(ctx)
+		}
+	}
+}
+
+// runExitPoll keeps each instance's reported exit relay current.
+func (p *Pool) runExitPoll(ctx context.Context) {
+	ticker := time.NewTicker(exitRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.RefreshExitNodes()
+			p.pinExits(ctx)
+			p.stats.RecordRoutable(p.RoutableCount())
 		}
 	}
 }
@@ -197,12 +255,41 @@ func (p *Pool) Run(ctx context.Context) {
 // RefreshExitNodes re-reads the current exit relay of every ready instance.
 //
 // Failures are expected and ignored: an instance with no circuit yet simply has
-// no exit to report.
+// no exit to report, and one whose control connection is mid-command is skipped
+// rather than queued behind it — the next tick is soon enough.
 func (p *Pool) RefreshExitNodes() {
 	for _, inst := range p.readyInstances() {
-		if _, err := inst.RefreshExitNode(); err != nil {
+		if _, err := inst.TryRefreshExitNode(); err != nil {
 			p.log.Debug("exit node unavailable", "instance", inst.Index(), "error", err)
 		}
+	}
+}
+
+// pinExits locks any ready instance that is not pinned to an exit relay yet.
+//
+// Instances arrive unpinned from boot, from a restart and from a resize, so this
+// runs on the poll rather than at any one of those moments. Instances still
+// rotating are skipped: their rotation pins them at the end, and pinning them to
+// the exit they are in the middle of discarding would undo it.
+func (p *Pool) pinExits(ctx context.Context) {
+	if !p.cfg.PinExitRelay {
+		return
+	}
+	for _, inst := range p.readyInstances() {
+		index := inst.Index()
+		if inst.PinnedExit() != "" || p.rotationWindow(index, time.Now()) {
+			continue
+		}
+		node := inst.ExitNode()
+		if node.Fingerprint == "" {
+			continue
+		}
+		if err := inst.PinExit(ctx, node.Fingerprint); err != nil {
+			p.log.Warn("pinning the exit relay failed", "instance", index, "error", err)
+			continue
+		}
+		p.events.Instance(stats.EventInstance, index,
+			"pinned to exit relay "+node.Address, node.Fingerprint)
 	}
 }
 
@@ -213,20 +300,34 @@ func (p *Pool) RefreshExitNodes() {
 // pool, so reassignment only ever happens for a reason worth logging.
 func (p *Pool) Route(key string) (*tor.Instance, error) {
 	now := time.Now()
+	avoid := -1
 
 	// Look up before accounting: a reassignment must not be counted as two
 	// requests on the session.
 	if sess, ok := p.sessions.lookup(key); ok {
-		if inst, alive := p.fleet.Get(sess.Instance); alive && inst.Ready() {
+		inst, alive := p.fleet.Get(sess.Instance)
+		switch {
+		case !alive || !inst.Ready():
+			p.log.Info("session's instance is unavailable, reassigning",
+				"session", key, "previous_instance", sess.Instance)
+			p.sessions.drop(key)
+
+		case p.cfg.DrainOnRotate && p.isRotating(sess.Instance):
+			// The instance has just thrown its circuits away, so this request
+			// would wait on a rebuild it never asked for. Diverting the session
+			// covers the ones already pinned when the rotation began; this covers
+			// the ones that arrive during it.
+			p.log.Debug("session's instance is rotating, reassigning",
+				"session", key, "previous_instance", sess.Instance)
+			avoid = sess.Instance
+
+		default:
 			p.sessions.begin(key, now)
 			return inst, nil
 		}
-		p.log.Info("session's instance is unavailable, reassigning",
-			"session", key, "previous_instance", sess.Instance)
-		p.sessions.drop(key)
 	}
 
-	inst, err := p.assign(key, now, -1)
+	inst, err := p.assign(key, now, avoid)
 	if err != nil {
 		return nil, err
 	}
@@ -292,21 +393,25 @@ func (p *Pool) RotateSession(key string, newnym bool) (*tor.Instance, error) {
 		return nil, err
 	}
 
-	if newnym && previous >= 0 {
+	// Avoiding the previous instance is a preference, not a guarantee: with one
+	// routable instance the caller lands back where it started. Rotating in place
+	// is then the only way to keep the promise the call makes, because a rotation
+	// that leaves the exit IP alone did nothing at all.
+	stayedPut := inst.Index() == previous
+	if (newnym || stayedPut) && previous >= 0 {
 		// The vacated instance rotates exactly like an operator-requested rotation
 		// would, including retiring its circuits and moving the *other* sessions
 		// off it: they are pinned to the exit this caller just declared burnt.
-		// It can block on tor's cooldown, so it must not hold up the next request.
-		go func() {
-			if err := p.RotateInstance(previous); err != nil && !errors.Is(err, context.Canceled) {
-				p.log.Warn("rotating vacated instance failed",
-					"instance", previous, "error", err)
-			}
-		}()
+		// It blocks on tor's cooldown, so it finishes in the background.
+		if err := p.StartRotateInstance(previous); err != nil &&
+			!errors.Is(err, ErrInstanceNotReady) && !errors.Is(err, ErrNoSuchInstance) {
+			p.log.Warn("rotating vacated instance failed", "instance", previous, "error", err)
+		}
 	}
 
 	p.log.Info("session rotated", "session", key,
-		"from_instance", previous, "to_instance", inst.Index(), "newnym", newnym)
+		"from_instance", previous, "to_instance", inst.Index(),
+		"newnym", newnym, "same_instance", stayedPut)
 	p.events.Session(stats.EventRotate, key, inst.Index(),
 		fmt.Sprintf("session rotated from instance %d", previous))
 	return inst, nil
@@ -360,6 +465,24 @@ func (p *Pool) beginRotation(instance int) {
 	p.healthMu.Unlock()
 }
 
+// beginRotationExclusive is beginRotation for a caller that has nothing to add to
+// a rotation already in progress. It reports whether it took the mark.
+//
+// Rotations do not usefully stack: each waits out tor's cooldown, so a client
+// that asks twice in quick succession would queue a second ten second wait for an
+// identity change the first one already delivered.
+func (p *Pool) beginRotationExclusive(instance int) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.rotating[instance] > 0 {
+		return false
+	}
+	p.rotating[instance]++
+	return true
+}
+
+// endRotation clears the mark and starts the grace period during which the
+// instance is not blamed for the failures its own rotation caused.
 func (p *Pool) endRotation(instance int) {
 	p.healthMu.Lock()
 	if p.rotating[instance] <= 1 {
@@ -367,7 +490,23 @@ func (p *Pool) endRotation(instance int) {
 	} else {
 		p.rotating[instance]--
 	}
+	p.quietUntil[instance] = time.Now().Add(rotationGrace)
 	p.healthMu.Unlock()
+}
+
+// isRotating reports whether a rotation is in flight on an instance.
+func (p *Pool) isRotating(instance int) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.rotating[instance] > 0
+}
+
+// rotationWindow reports whether an instance is rotating or still inside the
+// grace period that follows one.
+func (p *Pool) rotationWindow(instance int, now time.Time) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.rotating[instance] > 0 || now.Before(p.quietUntil[instance])
 }
 
 // preferSettled drops the instances that are mid-rotation, unless that would
