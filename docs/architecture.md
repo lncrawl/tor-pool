@@ -76,10 +76,21 @@ an exit by construction — are what streams actually ride; a resolver that acce
 
 Circuits older than the instance's last `NEWNYM` are excluded outright: that signal makes
 every existing circuit unusable for new streams, so their exits are no longer where the
-instance goes out. An **idle** instance builds no replacement — Tor waits for traffic — so
-after a rotation there is genuinely no current exit until the next request. The API reports
-none, and hands the discarded one over separately as `retired_exit_ip` so the dashboard can
-show what it was without claiming it is live.
+instance goes out. For the couple of seconds before Tor has rebuilt, the API reports no
+exit at all and hands the discarded one over separately as `retired_exit_ip`, so the
+dashboard can show what it *was* without claiming it is live.
+
+## Retiring circuits on rotation
+
+`NEWNYM` alone does not finish a rotation. It marks the existing circuits unusable for new
+streams but leaves them standing, and while they stand Tor sees no shortage of circuits and
+builds no replacement — an idle instance was measured sitting for minutes with nothing to
+report, while traffic was still observed leaving through a retired conflux set. Rotation
+therefore closes every exit-bearing circuit built before the `NEWNYM`; Tor rebuilds at once
+and the next request goes out through the new exit.
+
+Circuits carrying a stream are spared, because a proxy connection is pinned to its instance
+for its whole life and closing one would fail a request already in flight.
 
 Because a stream only exists during a request, the exit is sampled shortly after a
 connection is established, debounced per instance, plus a slow background refresh.

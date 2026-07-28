@@ -259,8 +259,13 @@ func (c *Control) ExitNode() (ExitNode, error) {
 type circuit struct {
 	id      string
 	exit    string
+	purpose string
 	created time.Time
 }
+
+// canCarryStream reports whether tor could attach a new stream to this circuit.
+// An unlinked conflux leg cannot: it is still negotiating with its partner.
+func (c circuit) canCarryStream() bool { return c.purpose != "CONFLUX_UNLINKED" }
 
 // selectExit picks which circuit's exit to report, most trustworthy first:
 //
@@ -276,6 +281,9 @@ type circuit struct {
 func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
 	usable := make([]circuit, 0, len(circuits))
 	for _, cc := range circuits {
+		if !cc.canCarryStream() {
+			continue
+		}
 		if c.lastNewnym.IsZero() || cc.created.After(c.lastNewnym) {
 			usable = append(usable, cc)
 		}
@@ -284,9 +292,12 @@ func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
 		return ""
 	}
 
-	if id := attachedCircuitID(streamStatus); id != "" {
+	if ids := streamCircuitIDs(streamStatus); len(ids) > 0 {
+		// The most recently attached stream is the best evidence of where this
+		// instance is going out right now.
+		attached := ids[len(ids)-1]
 		for _, cc := range usable {
-			if cc.id == id {
+			if cc.id == attached {
 				return cc.exit
 			}
 		}
@@ -310,15 +321,15 @@ func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
 	return newest.exit
 }
 
-// attachedCircuitID returns the circuit carrying the most recently attached
-// stream, or "" when no stream is attached — between requests there usually is
-// none.
+// streamCircuitIDs lists the circuits currently carrying streams, in the order
+// stream-status reported them. It is empty between requests, which is the normal
+// case for an idle instance.
 //
 // stream-status lines look like:
 //
 //	<streamID> SUCCEEDED <circuitID> example.com:443
-func attachedCircuitID(streamStatus string) string {
-	var circuitID string
+func streamCircuitIDs(streamStatus string) []string {
+	var ids []string
 	for line := range strings.SplitSeq(streamStatus, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) < 3 {
@@ -328,22 +339,76 @@ func attachedCircuitID(streamStatus string) string {
 		if fields[1] != "SUCCEEDED" || fields[2] == "0" {
 			continue
 		}
-		circuitID = fields[2]
+		ids = append(ids, fields[2])
 	}
-	return circuitID
+	return ids
 }
 
-// exitPurposes are the circuit purposes that carry exit traffic.
+// CloseRetiredCircuits tears down the circuits the last NEWNYM retired, and
+// reports how many it closed.
 //
-// CONFLUX_LINKED is not an exotic case: conflux is on by default in current tor,
-// and once a set is linked those legs are what streams actually ride. A resolver
-// that only accepts GENERAL reads the preemptive circuits tor keeps around and
-// never the ones in use — it names an exit the traffic is not leaving through,
-// and follows tor between them as they are rebuilt. Legs of one conflux set
-// share their exit by construction, so they all resolve to the same relay.
+// NEWNYM on its own is not enough. Tor marks the existing circuits unusable for
+// new streams but leaves them standing, and while they stand it has no reason to
+// build replacements: an idle instance sits for minutes with no circuit whose
+// exit it could honestly report, and traffic has been seen still leaving through
+// a retired conflux set. Closing them forces tor to rebuild immediately, which
+// is what makes a rotation take effect on the next request rather than eventually.
+//
+// Circuits carrying a stream are left alone. A proxy connection is pinned to its
+// instance for its whole life, so cutting one would fail a request already in
+// flight — including an idle HTTP CONNECT tunnel, whose stream stays open
+// between requests.
+func (c *Control) CloseRetiredCircuits() (int, error) {
+	if !c.authenticated {
+		return 0, ErrNotAuthenticated
+	}
+	if c.lastNewnym.IsZero() {
+		return 0, nil
+	}
+
+	circuits, err := c.GetInfo("circuit-status")
+	if err != nil {
+		return 0, err
+	}
+	streams, _ := c.GetInfo("stream-status")
+	busy := make(map[string]bool, 4)
+	for _, id := range streamCircuitIDs(streams) {
+		busy[id] = true
+	}
+
+	var (
+		closed int
+		errs   []error
+	)
+	for _, cc := range parseCircuits(circuits) {
+		if busy[cc.id] || cc.created.IsZero() || cc.created.After(c.lastNewnym) {
+			continue
+		}
+		if _, err := c.command("CLOSECIRCUIT " + cc.id); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		closed++
+	}
+	return closed, errors.Join(errs...)
+}
+
+// exitPurposes are the circuit purposes that exit to the internet.
+//
+// The conflux ones are not an exotic case: conflux is on by default in current
+// tor, and once a set is linked those legs are what streams actually ride. A
+// resolver that only accepts GENERAL reads the preemptive circuits tor keeps
+// around and never the ones in use — it names an exit the traffic is not leaving
+// through, and follows tor between them as they are rebuilt. Legs of one conflux
+// set share their exit by construction, so they all resolve to the same relay.
+//
+// CONFLUX_UNLINKED legs are included because they will exit once linked, which
+// makes them worth retiring on rotation; canCarryStream keeps them out of the
+// reported answer until then.
 var exitPurposes = map[string]bool{
-	"PURPOSE=GENERAL":        true,
-	"PURPOSE=CONFLUX_LINKED": true,
+	"GENERAL":          true,
+	"CONFLUX_LINKED":   true,
+	"CONFLUX_UNLINKED": true,
 }
 
 // parseCircuits pulls the exit-bearing circuits out of a circuit-status payload,
@@ -352,9 +417,8 @@ var exitPurposes = map[string]bool{
 //	5 BUILT $AAAA~guard,$BBBB~mid,$CCCC~exit BUILD_FLAGS=NEED_CAPACITY PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:12:33.123456
 //
 // Anything not BUILT has no usable path yet. Other purposes (HS_VANGUARDS,
-// HS_CLIENT_INTRO, CONFLUX_UNLINKED, …) either never exit or cannot carry a
-// stream yet, and an IS_INTERNAL circuit has no exit hop at all whatever its
-// purpose says.
+// HS_CLIENT_INTRO, MEASURE_TIMEOUT, …) never exit, and an IS_INTERNAL circuit has
+// no exit hop at all whatever its purpose says.
 func parseCircuits(circuitStatus string) []circuit {
 	var out []circuit
 	for line := range strings.SplitSeq(circuitStatus, "\n") {
@@ -364,14 +428,14 @@ func parseCircuits(circuitStatus string) []circuit {
 		}
 
 		var (
-			exits    bool
+			purpose  string
 			internal bool
 			created  time.Time
 		)
 		for _, field := range fields[3:] {
 			switch {
-			case exitPurposes[field]:
-				exits = true
+			case strings.HasPrefix(field, "PURPOSE="):
+				purpose = strings.TrimPrefix(field, "PURPOSE=")
 			case strings.HasPrefix(field, "BUILD_FLAGS="):
 				internal = strings.Contains(field, "IS_INTERNAL")
 			default:
@@ -380,11 +444,16 @@ func parseCircuits(circuitStatus string) []circuit {
 				}
 			}
 		}
-		if !exits || internal {
+		if !exitPurposes[purpose] || internal {
 			continue
 		}
 		if exit := lastHopFingerprint(fields[2]); exit != "" {
-			out = append(out, circuit{id: fields[0], exit: exit, created: created})
+			out = append(out, circuit{
+				id:      fields[0],
+				exit:    exit,
+				purpose: purpose,
+				created: created,
+			})
 		}
 	}
 	return out

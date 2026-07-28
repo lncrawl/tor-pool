@@ -98,7 +98,10 @@ isn't.
    to work while the exit IP never changes. The cooldown is therefore tracked client-side, from
    the last `NEWNYM` *this connection* sent — which is why the pool keeps one long-lived control
    connection per instance instead of dialling per command. Use `Control.Newnym`, which waits it
-   out, rather than `Signal("NEWNYM")` directly.
+   out, rather than `Signal("NEWNYM")` directly. **`NEWNYM` also does not retire anything by
+   itself** — the old circuits stay standing and usable enough that traffic has been seen still
+   leaving through them, so a rotation closes them (`CloseRetiredCircuits`). Drop that and
+   rotation silently stops taking effect on the next request.
 6. **Session keys are untrusted input.** They arrive as a SOCKS5 username or a
    `Proxy-Authorization` header from whoever can reach the proxy port. Bound the session table
    (`MAX_SESSIONS`), and never interpolate a key into a log message, a torrc, or a shell command

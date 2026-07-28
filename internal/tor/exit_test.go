@@ -47,6 +47,30 @@ func TestParseCircuitsAcceptsConfluxLegs(t *testing.T) {
 	}
 }
 
+func TestSelectExitSkipsUnlinkedConfluxLegs(t *testing.T) {
+	// An unlinked leg is still negotiating with its partner, so tor cannot attach
+	// a stream to it — but it is newer than everything else and would otherwise
+	// win on recency.
+	status := confluxCircuits +
+		"\n30 BUILT $AAAA~guard,$7777~unlinked BUILD_FLAGS=NEED_CAPACITY PURPOSE=CONFLUX_UNLINKED " +
+		"TIME_CREATED=2026-07-28T09:26:00.000000 CONFLUX_ID=9BD687E87B53"
+
+	var c Control
+	if got := c.selectExit(parseCircuits(status), ""); got == "7777" {
+		t.Error("exit = 7777, want a circuit that can actually carry a stream")
+	}
+}
+
+func TestParseCircuitsKeepsUnlinkedLegsForRetirement(t *testing.T) {
+	// They cannot be reported, but a rotation still has to close them.
+	status := "30 BUILT $AAAA~guard,$7777~unlinked BUILD_FLAGS=NEED_CAPACITY PURPOSE=CONFLUX_UNLINKED"
+
+	got := parseCircuits(status)
+	if len(got) != 1 || got[0].canCarryStream() {
+		t.Errorf("parsed %+v, want one circuit that cannot carry a stream", got)
+	}
+}
+
 func TestParseCircuitsSkipsInternalCircuits(t *testing.T) {
 	// IS_INTERNAL circuits terminate at a rendezvous point, not an exit, whatever
 	// their purpose reads.
@@ -183,6 +207,45 @@ func TestSelectExitWithNoCircuits(t *testing.T) {
 	var c Control
 	if got := c.selectExit(nil, "42 SUCCEEDED 1 example.com:443"); got != "" {
 		t.Errorf("exit = %q, want empty", got)
+	}
+}
+
+func TestCloseRetiredCircuitsSparesBusyAndFreshOnes(t *testing.T) {
+	// Circuit 1 is retired and idle — the only one that may be closed. Circuit 2
+	// is retired but carries a stream, and cutting it would fail a request
+	// already in flight. Circuit 3 was built after the rotation.
+	raw := "250+circuit-status=\r\n" +
+		"1 BUILT $AAAA~guard,$CCCC~old PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:10:00.000000\r\n" +
+		"2 BUILT $DDDD~guard,$FFFF~busy PURPOSE=CONFLUX_LINKED TIME_CREATED=2026-07-28T09:11:00.000000\r\n" +
+		"3 BUILT $EEEE~guard,$9999~new PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:20:00.000000\r\n" +
+		".\r\n250 OK\r\n" +
+		"250-stream-status=42 SUCCEEDED 2 example.com:443\r\n250 OK\r\n" +
+		"250 OK\r\n" // the one CLOSECIRCUIT
+
+	c := reply(raw)
+	c.conn = discardConn{}
+	c.authenticated = true
+	c.lastNewnym = time.Date(2026, 7, 28, 9, 15, 0, 0, time.UTC)
+
+	closed, err := c.CloseRetiredCircuits()
+	if err != nil {
+		t.Fatalf("CloseRetiredCircuits: %v", err)
+	}
+	if closed != 1 {
+		t.Errorf("closed = %d, want 1", closed)
+	}
+}
+
+func TestCloseRetiredCircuitsWithoutARotation(t *testing.T) {
+	// Nothing has been retired, so nothing may be closed — and no command should
+	// be sent at all.
+	c := reply("")
+	c.conn = discardConn{}
+	c.authenticated = true
+
+	closed, err := c.CloseRetiredCircuits()
+	if err != nil || closed != 0 {
+		t.Errorf("closed = %d, err = %v; want 0, nil", closed, err)
 	}
 }
 

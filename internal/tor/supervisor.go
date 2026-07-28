@@ -149,7 +149,17 @@ func (i *Instance) Newnym(ctx context.Context) error {
 	// out through.
 	i.retireExit()
 
-	i.log.Info("new circuit requested")
+	// NEWNYM leaves the retired circuits standing, and tor builds no replacement
+	// while they do. Closing them is what turns a rotation into a new exit on the
+	// very next request instead of whenever tor gets round to it.
+	closed, err := ctrl.CloseRetiredCircuits()
+	if err != nil {
+		// The rotation itself succeeded, so this is not worth failing the caller
+		// over: the exit is retired either way, just slower to be replaced.
+		i.log.Warn("closing retired circuits failed", "closed", closed, "error", err)
+	}
+
+	i.log.Info("new circuit requested", "circuits_closed", closed)
 	return nil
 }
 

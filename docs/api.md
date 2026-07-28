@@ -60,9 +60,8 @@ seconds to fully land.
 `exit_ip` is the exit **currently in use**, read from Tor's own consensus view and
 sampled while a connection is live. It is not a promise about the next request: Tor
 retires circuits on its own schedule. It is **empty** whenever the instance has no circuit
-whose exit it can name — before bootstrap finishes, and after a rotation, because a
-rotation discards the exit and Tor picks the replacement only when traffic arrives. On an
-idle instance that state lasts until its next request.
+whose exit it can name — before bootstrap finishes, and for the second or two after a
+rotation while Tor rebuilds.
 
 `retired_exit_ip` is set only in that window, and carries the exit the rotation discarded
 so a dashboard can show what it *was*. Never read it as the current exit.

@@ -92,11 +92,12 @@ Details that matter:
 - **Circuits built before the last NEWNYM are excluded.** That signal marks every existing
   circuit unusable for new streams — clean and dirty alike — so their exits are no longer where
   the instance goes out.
-- **After a NEWNYM an idle instance has no exit at all, and not briefly.** Tor does not
-  pre-build a replacement without traffic to predict, and the retired circuits linger as `BUILT`
-  meanwhile, so the honest answer stays "unknown" until the next request. Do not paper over it by
-  reporting the retired exit, and do not reach for `EXTENDCIRCUIT 0`: a controller-built circuit
-  is not used for ordinary streams and is closed again shortly after.
+- **After a NEWNYM the instance has no exit until tor rebuilds**, and it will not rebuild while
+  the retired circuits still stand — an idle instance was measured sitting for minutes. Closing
+  them (see below) is what makes the replacement appear in a second or two. Until it does, the
+  honest answer is "unknown": do not paper over it with the retired exit, and do not reach for
+  `EXTENDCIRCUIT 0` — a controller-built circuit is not used for ordinary streams and is closed
+  again shortly after.
 - `TIME_CREATED` is `2006-01-02T15:04:05.999999` with **no zone suffix and always UTC**. Parsing
   it as local time silently misdates every circuit.
 - Filter on `PURPOSE=GENERAL`. Hidden-service circuits (`HS_CLIENT_INTRO`, …) have no exit in
@@ -140,6 +141,27 @@ NEWNYM also does not touch **existing** connections — it only affects circuits
 A client holding a live proxy connection keeps its old exit until it reconnects. The pre-NEWNYM
 circuits stay listed as `BUILT` for a while too, which is why the exit resolver dates circuits
 against the last NEWNYM instead of trusting whatever is in `circuit-status`.
+
+## Retiring circuits after a rotation
+
+```
+CLOSECIRCUIT <id>
+```
+
+**NEWNYM is not sufficient on its own.** It marks the existing circuits unusable for new streams,
+but they stay up, and while they do:
+
+- tor sees no shortage of circuits and builds no replacement, so there is nothing to report;
+- traffic has been observed still exiting through a retired conflux set, which is what makes a
+  rotation look like it did nothing — the dashboard names a new exit while the client keeps
+  seeing the old IP.
+
+So `Control.CloseRetiredCircuits` closes every exit-bearing circuit dated before the last NEWNYM.
+Tor then rebuilds at once and the new exit resolves within a second or two.
+
+**Circuits carrying a stream must be spared** (`stream-status` lists them). A proxy connection is
+pinned to its instance for its whole life, so closing one fails a request already in flight —
+including an idle HTTP `CONNECT` tunnel, whose stream stays open between requests.
 
 ## SETCONF
 
