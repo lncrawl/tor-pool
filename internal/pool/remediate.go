@@ -220,7 +220,7 @@ func (p *Pool) ReleaseInstance(instance int) bool {
 func (p *Pool) RotateInstance(instance int) error {
 	inst, ok := p.fleet.Get(instance)
 	if !ok {
-		return errors.New("no such instance")
+		return ErrNoSuchInstance
 	}
 
 	// Order matters. The mark goes up first so nothing new is pinned here while
@@ -252,7 +252,7 @@ func (p *Pool) RotateInstance(instance int) error {
 func (p *Pool) RestartInstance(instance int, wipe bool) error {
 	inst, ok := p.fleet.Get(instance)
 	if !ok {
-		return errors.New("no such instance")
+		return ErrNoSuchInstance
 	}
 
 	h := p.healthFor(instance)
@@ -293,8 +293,11 @@ func (p *Pool) RotateAll() int {
 // Shrinking retires the highest-numbered instances and unpins their sessions, so
 // callers move rather than fail.
 func (p *Pool) Resize(size int) error {
-	if size < 1 {
-		return errors.New("pool size must be at least 1")
+	// The same bounds boot validation applies. A size the port layout cannot
+	// accommodate is not a big pool, it is thousands of tor processes that all
+	// fail to bind — asking for one used to take the whole pool down.
+	if err := p.cfg.ValidatePoolSize(size); err != nil {
+		return err
 	}
 
 	// New instances take tens of seconds to bootstrap, far longer than the

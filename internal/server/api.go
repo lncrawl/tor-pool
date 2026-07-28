@@ -19,7 +19,11 @@ import (
 )
 
 // errNoSuchInstance is returned for an action addressed to a retired instance.
-var errNoSuchInstance = errors.New("no such instance")
+//
+// It aliases the pool's sentinel rather than declaring a second error with the
+// same text: the existence check here and the one inside the pool race with a
+// resize, and a distinct value would make the loser of that race a 500.
+var errNoSuchInstance = pool.ErrNoSuchInstance
 
 // Server serves the API and dashboard.
 type Server struct {

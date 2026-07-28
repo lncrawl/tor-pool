@@ -142,6 +142,11 @@ func TestResizeRejectsBadInput(t *testing.T) {
 	if got := do(t, s, http.MethodPost, "/api/pool/resize", `{"size":0}`).Code; got != http.StatusBadRequest {
 		t.Errorf("zero size = %d, want 400", got)
 	}
+	// A size the port layout cannot hold is not a big pool: accepting it spawns
+	// thousands of tor processes that cannot bind, and the pool never comes back.
+	if got := do(t, s, http.MethodPost, "/api/pool/resize", `{"size":99999}`).Code; got != http.StatusBadRequest {
+		t.Errorf("unrunnable size = %d, want 400", got)
+	}
 }
 
 func TestMetricsExposition(t *testing.T) {

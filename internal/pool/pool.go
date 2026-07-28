@@ -30,6 +30,14 @@ type Outcome struct {
 // retry logic handles it far better than an unbounded wait here would.
 var ErrNoInstance = errors.New("pool: no healthy instance available")
 
+// ErrNoSuchInstance means the operation named an instance the fleet does not
+// have — including one retired between a caller's check and its request, which
+// is a race the dashboard hits whenever a resize overlaps a row action.
+//
+// Exported so the API can answer 404 rather than 500: a caller acting on a
+// vanished instance made a stale request, it did not break the server.
+var ErrNoSuchInstance = errors.New("no such instance")
+
 const (
 	// sweepInterval is how often idle sessions are collected.
 	sweepInterval = 30 * time.Second

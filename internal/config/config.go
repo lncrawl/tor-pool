@@ -137,6 +137,28 @@ func (c *Config) InstanceControlPort(i int) int {
 // also caps how large a single pool may grow.
 const instancePortBlock = 500
 
+// ValidatePoolSize reports whether size is a pool this configuration could
+// actually run: the two port blocks have to stay disjoint and fit under 65535.
+//
+// Exported because the pool can be resized at runtime, and that path needs the
+// same answer boot validation gets. Without it, a resize request is free to ask
+// for a pool whose ports cannot exist — which spawns thousands of tor processes
+// that all fail to bind.
+func (c *Config) ValidatePoolSize(size int) error {
+	switch {
+	case size < 1:
+		return fmt.Errorf("pool size must be at least 1, got %d", size)
+	case size > instancePortBlock:
+		return fmt.Errorf("pool size must be at most %d, got %d", instancePortBlock, size)
+	}
+	if highest := c.InstanceControlPort(size - 1); highest > 65535 {
+		return fmt.Errorf(
+			"INSTANCE_PORT_BASE %d with pool size %d needs ports up to %d, past 65535",
+			c.InstancePortBase, size, highest)
+	}
+	return nil
+}
+
 // Load reads configuration from the process environment, applying Defaults for
 // anything unset, then validates the result.
 func Load() (Config, error) {
