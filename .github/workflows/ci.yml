@@ -62,22 +62,26 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
-
       # `npm run build` writes over the committed placeholder, and the real
       # index.html references a hashed asset that is not tracked — so a binary
       # built from it serves a broken page to anyone who did not run npm.
-      - name: The committed dashboard placeholder must survive a build
+      #
+      # This inspects the committed blob rather than the working tree, so it
+      # cannot be fooled by running before or after the build.
+      - name: The committed dashboard file must be the placeholder
         working-directory: .
         run: |
-          if ! git diff --quiet -- internal/server/dist/index.html; then
-            echo "internal/server/dist/index.html was committed as build output."
-            echo "Restore it: git checkout internal/server/dist/index.html"
-            git diff -- internal/server/dist/index.html
+          if git show HEAD:internal/server/dist/index.html | grep -q '/assets/'; then
+            echo "internal/server/dist/index.html was committed as build output:"
+            echo "it references a hashed asset that is not tracked, so a binary"
+            echo "built without npm would serve a broken page."
+            echo "Fix: git checkout internal/server/dist/index.html"
             exit 1
           fi
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
 
   image:
     name: Image
