@@ -46,6 +46,7 @@ type Config struct {
 	SessionTTL     time.Duration
 	DefaultSession SessionSource
 	MaxSessions    int
+	DrainOnRotate  bool
 
 	// Health and remediation
 	FailureWindow         time.Duration
@@ -90,6 +91,13 @@ func Defaults() Config {
 		SessionTTL:     10 * time.Minute,
 		DefaultSession: SessionFromIP,
 		MaxSessions:    10000,
+
+		// On by default because rotating an instance is a statement that its
+		// identity is spent: leaving its callers on it means they keep waiting
+		// on the one instance that has just thrown its circuits away. Turn it
+		// off when a session's stickiness matters more than its exit — a login
+		// that the target site has tied to one IP, say.
+		DrainOnRotate: true,
 
 		FailureWindow:         time.Minute,
 		QuarantineFailures:    5,
@@ -162,6 +170,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envDuration(look, "SESSION_TTL", &c.SessionTTL))
 	collect(envSessionSource(look, "DEFAULT_SESSION", &c.DefaultSession))
 	collect(envInt(look, "MAX_SESSIONS", &c.MaxSessions))
+	collect(envBool(look, "DRAIN_ON_ROTATE", &c.DrainOnRotate))
 
 	collect(envDuration(look, "FAILURE_WINDOW", &c.FailureWindow))
 	collect(envInt(look, "QUARANTINE_FAILURES", &c.QuarantineFailures))

@@ -42,6 +42,11 @@ New sessions go to the instance with the fewest pinned sessions, with a random
 tie-break — a deterministic tie-break would funnel every new session onto the same
 instance until its count rose.
 
+Instances that are **mid-rotation** are skipped: one that has just closed its circuits has
+none to offer for a second or two, and a caller pinned to it there and then would wait on
+a rotation it never asked for. They stay candidates of last resort, so a single-instance
+pool still routes.
+
 **Credentials are not forwarded to Tor.** Tor's `IsolateSOCKSAuth` is on by default, so
 passing the key through would give each session its own circuit *inside* one instance.
 Two callers pinned to the same instance would then see different exit IPs, and "an

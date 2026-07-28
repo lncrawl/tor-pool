@@ -22,6 +22,9 @@ services:
       # Idle sessions are unpinned after this long.
       SESSION_TTL: '${SESSION_TTL:-10m}'
 
+      # Move an instance's sessions elsewhere when it is rotated.
+      DRAIN_ON_ROTATE: '${DRAIN_ON_ROTATE:-true}'
+
       LOG_LEVEL: '${LOG_LEVEL:-info}'
 
     ports:

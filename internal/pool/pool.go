@@ -78,6 +78,10 @@ type Pool struct {
 	// remediating guards against two remediations running on one instance at
 	// once, which could restart tor underneath itself.
 	remediating map[int]bool
+
+	// rotating counts the rotations in flight per instance, so assignment can
+	// steer new callers away from an instance that has no circuits right now.
+	rotating map[int]int
 }
 
 // New builds a pool over an existing fleet.
@@ -92,6 +96,7 @@ func New(cfg *config.Config, fleet *tor.Fleet, log *slog.Logger) *Pool {
 		events:         stats.NewEventLog(eventLogSize),
 		health:         make(map[int]*health),
 		remediating:    make(map[int]bool),
+		rotating:       make(map[int]int),
 	}
 }
 
@@ -139,6 +144,7 @@ func (p *Pool) forgetInstance(instance int) {
 	p.healthMu.Lock()
 	delete(p.health, instance)
 	delete(p.remediating, instance)
+	delete(p.rotating, instance)
 	p.healthMu.Unlock()
 
 	p.sampleMu.Lock()
@@ -227,6 +233,7 @@ func (p *Pool) assign(key string, now time.Time, exclude int) (*tor.Instance, er
 	if len(candidates) == 0 {
 		return nil, ErrNoInstance
 	}
+	candidates = p.preferSettled(candidates)
 
 	inst := pick(candidates, p.sessions.countByInstance(), exclude)
 	if inst == nil {
@@ -278,17 +285,16 @@ func (p *Pool) RotateSession(key string, newnym bool) (*tor.Instance, error) {
 	}
 
 	if newnym && previous >= 0 {
-		if old, ok := p.fleet.Get(previous); ok {
-			// Rotating the vacated instance can block on tor's cooldown, so it
-			// must not hold up the caller's next request.
-			ctx := p.poolCtx()
-			go func() {
-				if err := old.Newnym(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					p.log.Warn("newnym on vacated instance failed",
-						"instance", previous, "error", err)
-				}
-			}()
-		}
+		// The vacated instance rotates exactly like an operator-requested rotation
+		// would, including retiring its circuits and moving the *other* sessions
+		// off it: they are pinned to the exit this caller just declared burnt.
+		// It can block on tor's cooldown, so it must not hold up the next request.
+		go func() {
+			if err := p.RotateInstance(previous); err != nil && !errors.Is(err, context.Canceled) {
+				p.log.Warn("rotating vacated instance failed",
+					"instance", previous, "error", err)
+			}
+		}()
 	}
 
 	p.log.Info("session rotated", "session", key,
@@ -335,6 +341,84 @@ func (p *Pool) SessionCount() int { return p.sessions.count() }
 
 // SessionsPerInstance reports how many sessions each instance carries.
 func (p *Pool) SessionsPerInstance() map[int]int { return p.sessions.countByInstance() }
+
+// beginRotation marks an instance as mid-rotation, so nothing new is pinned to
+// it while it has no circuits. It is a count, not a flag: a pool-wide rotation
+// and a session rotation can overlap on one instance, and the first to finish
+// must not clear the other's mark.
+func (p *Pool) beginRotation(instance int) {
+	p.healthMu.Lock()
+	p.rotating[instance]++
+	p.healthMu.Unlock()
+}
+
+func (p *Pool) endRotation(instance int) {
+	p.healthMu.Lock()
+	if p.rotating[instance] <= 1 {
+		delete(p.rotating, instance)
+	} else {
+		p.rotating[instance]--
+	}
+	p.healthMu.Unlock()
+}
+
+// preferSettled drops the instances that are mid-rotation, unless that would
+// leave nothing to choose from.
+//
+// A rotating instance has just closed its circuits and has none to offer for a
+// second or two, so a caller pinned to it there and then would wait on — or fail
+// against — a rotation it never asked for. It stays a candidate of last resort
+// because a single-instance pool must still route.
+func (p *Pool) preferSettled(candidates []*tor.Instance) []*tor.Instance {
+	p.healthMu.Lock()
+	rotating := len(p.rotating)
+	settled := make([]*tor.Instance, 0, len(candidates))
+	if rotating > 0 {
+		for _, inst := range candidates {
+			if p.rotating[inst.Index()] == 0 {
+				settled = append(settled, inst)
+			}
+		}
+	}
+	p.healthMu.Unlock()
+
+	if rotating == 0 || len(settled) == 0 {
+		return candidates
+	}
+	return settled
+}
+
+// divertSessions repins every session on an instance to a different one, and
+// reports how many moved.
+//
+// Reassignment is immediate rather than lazy, unlike a drain. Unpinning would
+// leave the choice to each session's next request, and an instance that has just
+// lost all of its sessions looks like the least loaded one — so the displaced
+// callers would land straight back on the instance being rotated. Pinning them
+// one at a time still spreads them, because each pin counts towards the next
+// pick.
+//
+// Connections already in flight keep the instance they were dialled through;
+// only the next one is affected.
+func (p *Pool) divertSessions(instance int) int {
+	now := time.Now()
+
+	var moved int
+	for _, sess := range p.sessions.list() {
+		if sess.Instance != instance {
+			continue
+		}
+		if _, err := p.assign(sess.Key, now, instance); err != nil {
+			// Nothing else can take it. Leaving the pinning alone beats dropping
+			// it: the instance is losing its exit, not its ability to serve.
+			p.log.Warn("cannot divert session off rotating instance",
+				"session", sess.Key, "instance", instance, "error", err)
+			continue
+		}
+		moved++
+	}
+	return moved
+}
 
 // DrainInstance unpins every session on an instance so they move elsewhere.
 func (p *Pool) DrainInstance(instance int) int {

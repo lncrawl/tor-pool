@@ -222,6 +222,21 @@ func (p *Pool) RotateInstance(instance int) error {
 	if !ok {
 		return errors.New("no such instance")
 	}
+
+	// Order matters. The mark goes up first so nothing new is pinned here while
+	// the circuits are gone, then the sitting sessions are moved off, and only
+	// then does the instance lose its circuits. Rotating first would fail the
+	// requests that arrive in between.
+	p.beginRotation(instance)
+	defer p.endRotation(instance)
+
+	if p.cfg.DrainOnRotate {
+		if moved := p.divertSessions(instance); moved > 0 {
+			p.log.Info("sessions diverted off rotating instance",
+				"instance", instance, "sessions_moved", moved)
+		}
+	}
+
 	ctx := p.poolCtx()
 	if err := inst.Newnym(ctx); err != nil {
 		return err

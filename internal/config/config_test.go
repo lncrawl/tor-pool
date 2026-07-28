@@ -69,6 +69,20 @@ func TestLoadParsesOverrides(t *testing.T) {
 	}
 }
 
+func TestDrainOnRotateIsOnUnlessDisabled(t *testing.T) {
+	if !Defaults().DrainOnRotate {
+		t.Error("DrainOnRotate defaults to false, want true")
+	}
+
+	c, err := loadFrom(env(map[string]string{"DRAIN_ON_ROTATE": "false"}))
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if c.DrainOnRotate {
+		t.Error("DrainOnRotate = true, want false when disabled explicitly")
+	}
+}
+
 func TestEmptyHTTPPortDisablesListener(t *testing.T) {
 	c, err := loadFrom(env(map[string]string{"HTTP_PORT": ""}))
 	if err != nil {

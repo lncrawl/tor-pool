@@ -73,7 +73,7 @@ so a dashboard can show what it *was*. Never read it as the current exit.
 
 | Endpoint | Effect |
 | --- | --- |
-| `POST /api/instances/{id}/rotate` | New circuit (waits out Tor's cooldown) |
+| `POST /api/instances/{id}/rotate` | New circuit (waits out Tor's cooldown). Its sessions are moved to other instances unless `DRAIN_ON_ROTATE` is off |
 | `POST /api/instances/{id}/restart` | Restart tor. `?wipe=false` keeps guards and cached consensus; the default wipes for a genuinely new identity |
 | `POST /api/instances/{id}/quarantine` | Take out of rotation and move its sessions |
 | `POST /api/instances/{id}/release` | Clear quarantine and accumulated failures |

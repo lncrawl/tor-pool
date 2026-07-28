@@ -36,6 +36,18 @@ considered idle, however old.
 `MAX_SESSIONS` bounds the table. Session keys are untrusted input — a caller cycling
 keys would otherwise grow it without limit.
 
+`DRAIN_ON_ROTATE` moves an instance's sessions onto other instances when that instance is
+rotated, which is on by default: rotating is a statement that the exit is spent, and its
+callers would otherwise sit on the one instance that has just discarded its circuits.
+Turn it off when a session's stickiness matters more than its exit — a login the target
+site has tied to one IP, say. Either way, connections already in flight keep the instance
+they were dialled through; only the next one moves.
+
+Independently of this setting, a *new* session is never pinned to an instance that is
+mid-rotation unless there is nothing else to pin it to — the sequence is mark, divert,
+then rotate, so requests arriving during a rotation are not handed an instance without
+circuits.
+
 ## Health and remediation
 
 Two thresholds, because they catch different failures:
