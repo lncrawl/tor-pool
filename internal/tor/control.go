@@ -45,7 +45,14 @@ type Control struct {
 	// lastNewnym is when this connection last sent an effective NEWNYM. Tor
 	// exposes no way to query its own cooldown timer, so tracking it here is
 	// the only way to know whether the next signal will actually be honoured.
+	// It doubles as the cutoff for which circuits may still be reported as this
+	// instance's exit, because NEWNYM makes every older circuit unusable.
 	lastNewnym time.Time
+
+	// lastExit is the exit fingerprint ExitNode reported last. Holding onto it
+	// keeps an idle instance reporting one identity instead of following tor
+	// around its preemptively built circuits.
+	lastExit string
 }
 
 // Dial opens a control connection. The caller must call Authenticate before
@@ -99,6 +106,8 @@ func (c *Control) Signal(name string) error {
 	}
 	if strings.EqualFold(name, "NEWNYM") {
 		c.lastNewnym = time.Now()
+		// The exit we were reporting is exactly the one this signal retired.
+		c.lastExit = ""
 	}
 	return nil
 }
@@ -196,31 +205,38 @@ type ExitNode struct {
 	Country     string
 }
 
+// errNoUsableCircuit means tor currently has no circuit whose exit this
+// instance can honestly be said to go out through. It is a normal transient
+// right after bootstrap and right after a NEWNYM.
+var errNoUsableCircuit = errors.New("tor: no usable exit circuit yet")
+
 // ExitNode resolves the exit relay this instance is currently exiting through.
 //
 // This reads the exit relay's advertised address from tor's own consensus view,
 // which costs no Tor bandwidth — unlike fetching an IP-echo URL through the
 // circuit. It is the real exit address a target site would see.
 //
-// Circuits carrying live streams are preferred over merely-built ones: tor
-// builds circuits preemptively for future requests, and reporting one of those
-// would name an exit no traffic has ever used.
+// The answer has to be *stable*, not merely current. Tor holds several built
+// circuits at once and keeps building more preemptively, so naming whichever is
+// newest makes the reported exit flip between relays no traffic ever used —
+// which is what makes an instance look like it has two exits at once. selectExit
+// holds the choice still; see it for the ordering.
 func (c *Control) ExitNode() (ExitNode, error) {
 	circuits, err := c.GetInfo("circuit-status")
 	if err != nil {
 		return ExitNode{}, err
 	}
+	// Best effort: without stream-status the choice falls back to the circuit
+	// set alone, which is what happens between requests anyway.
+	streams, _ := c.GetInfo("stream-status")
 
-	var fp string
-	if streams, err := c.GetInfo("stream-status"); err == nil {
-		fp = attachedExitFingerprint(streams, circuits)
-	}
+	fp := c.selectExit(parseCircuits(circuits), streams)
 	if fp == "" {
-		fp, err = newestExitFingerprint(circuits)
-		if err != nil {
-			return ExitNode{}, err
-		}
+		return ExitNode{}, errNoUsableCircuit
 	}
+	// Record the choice before the lookups so a failing consensus query leaves
+	// the next call on the same circuit rather than moving it.
+	c.lastExit = fp
 
 	desc, err := c.GetInfo("ns/id/" + fp)
 	if err != nil {
@@ -239,16 +255,69 @@ func (c *Control) ExitNode() (ExitNode, error) {
 	return node, nil
 }
 
-// attachedExitFingerprint finds the exit of a circuit that currently carries a
-// stream, which is the exit traffic is actually leaving through.
+// circuit is one BUILT, exit-bearing circuit as circuit-status reported it.
+type circuit struct {
+	id      string
+	exit    string
+	created time.Time
+}
+
+// selectExit picks which circuit's exit to report, most trustworthy first:
+//
+//  1. the circuit carrying a stream — the only one tor has committed traffic to;
+//  2. the exit reported last time, as long as a circuit to it still stands, so
+//     an idle instance keeps naming one identity;
+//  3. the newest circuit, when there is nothing better to go on.
+//
+// Circuits built before the last NEWNYM are excluded outright. That signal marks
+// every existing circuit unusable for new streams, so their exits are no longer
+// where this instance goes out; reporting one alongside a replacement circuit is
+// what made a rotation look like it toggled between two relays.
+func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
+	usable := make([]circuit, 0, len(circuits))
+	for _, cc := range circuits {
+		if c.lastNewnym.IsZero() || cc.created.After(c.lastNewnym) {
+			usable = append(usable, cc)
+		}
+	}
+	if len(usable) == 0 {
+		return ""
+	}
+
+	if id := attachedCircuitID(streamStatus); id != "" {
+		for _, cc := range usable {
+			if cc.id == id {
+				return cc.exit
+			}
+		}
+	}
+	if c.lastExit != "" {
+		for _, cc := range usable {
+			if cc.exit == c.lastExit {
+				return cc.exit
+			}
+		}
+	}
+
+	// A tie — including a payload with no TIME_CREATED at all — falls back to
+	// tor's own listing order, whose last entry is the most recent.
+	newest := usable[0]
+	for _, cc := range usable[1:] {
+		if !cc.created.Before(newest.created) {
+			newest = cc
+		}
+	}
+	return newest.exit
+}
+
+// attachedCircuitID returns the circuit carrying the most recently attached
+// stream, or "" when no stream is attached — between requests there usually is
+// none.
 //
 // stream-status lines look like:
 //
 //	<streamID> SUCCEEDED <circuitID> example.com:443
-//
-// Returns "" when no stream is attached — between requests there usually is
-// none, and the caller then falls back to the newest built circuit.
-func attachedExitFingerprint(streamStatus, circuitStatus string) string {
+func attachedCircuitID(streamStatus string) string {
 	var circuitID string
 	for line := range strings.SplitSeq(streamStatus, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
@@ -261,22 +330,80 @@ func attachedExitFingerprint(streamStatus, circuitStatus string) string {
 		}
 		circuitID = fields[2]
 	}
-	if circuitID == "" {
-		return ""
-	}
-	return exitFingerprintOfCircuit(circuitStatus, circuitID)
+	return circuitID
 }
 
-// exitFingerprintOfCircuit returns the last hop of one circuit by id.
-func exitFingerprintOfCircuit(circuitStatus, circuitID string) string {
+// exitPurposes are the circuit purposes that carry exit traffic.
+//
+// CONFLUX_LINKED is not an exotic case: conflux is on by default in current tor,
+// and once a set is linked those legs are what streams actually ride. A resolver
+// that only accepts GENERAL reads the preemptive circuits tor keeps around and
+// never the ones in use — it names an exit the traffic is not leaving through,
+// and follows tor between them as they are rebuilt. Legs of one conflux set
+// share their exit by construction, so they all resolve to the same relay.
+var exitPurposes = map[string]bool{
+	"PURPOSE=GENERAL":        true,
+	"PURPOSE=CONFLUX_LINKED": true,
+}
+
+// parseCircuits pulls the exit-bearing circuits out of a circuit-status payload,
+// keeping tor's own listing order. Lines look like:
+//
+//	5 BUILT $AAAA~guard,$BBBB~mid,$CCCC~exit BUILD_FLAGS=NEED_CAPACITY PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:12:33.123456
+//
+// Anything not BUILT has no usable path yet. Other purposes (HS_VANGUARDS,
+// HS_CLIENT_INTRO, CONFLUX_UNLINKED, …) either never exit or cannot carry a
+// stream yet, and an IS_INTERNAL circuit has no exit hop at all whatever its
+// purpose says.
+func parseCircuits(circuitStatus string) []circuit {
+	var out []circuit
 	for line := range strings.SplitSeq(circuitStatus, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 3 || fields[0] != circuitID {
+		if len(fields) < 3 || fields[1] != "BUILT" {
 			continue
 		}
-		return lastHopFingerprint(fields[2])
+
+		var (
+			exits    bool
+			internal bool
+			created  time.Time
+		)
+		for _, field := range fields[3:] {
+			switch {
+			case exitPurposes[field]:
+				exits = true
+			case strings.HasPrefix(field, "BUILD_FLAGS="):
+				internal = strings.Contains(field, "IS_INTERNAL")
+			default:
+				if v, ok := strings.CutPrefix(field, "TIME_CREATED="); ok {
+					created = parseTimeCreated(v)
+				}
+			}
+		}
+		if !exits || internal {
+			continue
+		}
+		if exit := lastHopFingerprint(fields[2]); exit != "" {
+			out = append(out, circuit{id: fields[0], exit: exit, created: created})
+		}
 	}
-	return ""
+	return out
+}
+
+// timeCreatedLayout is tor's ISOTime2Frac form. It carries no zone suffix and is
+// always UTC, so it has to be parsed as UTC rather than local time.
+const timeCreatedLayout = "2006-01-02T15:04:05.999999"
+
+// parseTimeCreated reads a TIME_CREATED value. An unparseable one yields the
+// zero time, meaning "age unknown" — which keeps the circuit out of the running
+// once a NEWNYM has happened, because an exit that cannot be shown to be fresh
+// must not be reported as one.
+func parseTimeCreated(value string) time.Time {
+	created, err := time.ParseInLocation(timeCreatedLayout, unquoteControlValue(value), time.UTC)
+	if err != nil {
+		return time.Time{}
+	}
+	return created
 }
 
 // lastHopFingerprint extracts the exit fingerprint from a circuit path.
@@ -290,33 +417,6 @@ func lastHopFingerprint(path string) string {
 		last = last[:i]
 	}
 	return last
-}
-
-// newestExitFingerprint picks the last hop of the most recently built BUILT
-// circuit. Circuits are listed oldest-first, so the last match is the newest.
-func newestExitFingerprint(circuitStatus string) (string, error) {
-	var fingerprint string
-	for line := range strings.SplitSeq(circuitStatus, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// <id> BUILT <path> BUILD_FLAGS=... PURPOSE=GENERAL ...
-		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[1] != "BUILT" {
-			continue
-		}
-		if !strings.Contains(line, "PURPOSE=GENERAL") {
-			continue
-		}
-		if last := lastHopFingerprint(fields[2]); last != "" {
-			fingerprint = last
-		}
-	}
-	if fingerprint == "" {
-		return "", errors.New("tor: no built general-purpose circuit yet")
-	}
-	return fingerprint, nil
 }
 
 // parseNetworkStatus pulls the nickname and address out of an "r" line:

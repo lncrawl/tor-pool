@@ -79,17 +79,36 @@ export function Instances() {
     {
       title: 'Exit',
       key: 'exit',
-      render: (_, r) =>
-        r.exit_ip ? (
-          <Space direction="vertical" size={0}>
-            <Typography.Text code>{r.exit_ip}</Typography.Text>
-            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-              {[r.exit_country, r.exit_nickname].filter(Boolean).join(' · ')}
-            </Typography.Text>
-          </Space>
-        ) : (
-          <Typography.Text type="secondary">—</Typography.Text>
-        ),
+      render: (_, r) => {
+        if (r.exit_ip) {
+          return (
+            <Space direction="vertical" size={0}>
+              <Typography.Text code>{r.exit_ip}</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                {[r.exit_country, r.exit_nickname].filter(Boolean).join(' · ')}
+              </Typography.Text>
+            </Space>
+          );
+        }
+        // A rotation discards the exit and Tor commits to the next one only when
+        // traffic arrives, so the retired one is shown struck through rather
+        // than leaving the column blank as if nothing were known.
+        if (r.retired_exit_ip) {
+          return (
+            <Tooltip title="Retired by a rotation. The next request through this instance picks a new exit.">
+              <Space direction="vertical" size={0}>
+                <Typography.Text code delete type="secondary">
+                  {r.retired_exit_ip}
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  awaiting a new circuit
+                </Typography.Text>
+              </Space>
+            </Tooltip>
+          );
+        }
+        return <Typography.Text type="secondary">—</Typography.Text>;
+      },
     },
     {
       title: 'Sessions',

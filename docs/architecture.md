@@ -57,9 +57,29 @@ circuit-status → the circuit carrying a live stream → its last hop
               → ip-to-country/<address>
 ```
 
-Circuits with an attached stream are preferred over merely-built ones. Tor builds
-circuits preemptively, and reporting one of those names an exit that no traffic has ever
-used — which is exactly what the first implementation did, and it reported the wrong IP.
+The answer must be *stable*, not merely current, because "an instance is an exit
+identity" is only true if the reported exit holds still. Tor keeps several built circuits
+at once and keeps building more preemptively, so the choice is made in this order:
+
+1. the circuit carrying a stream — the only one Tor has committed traffic to;
+2. the exit reported last time, while a circuit to it still stands;
+3. the newest circuit, by its `TIME_CREATED`, when there is nothing better to go on.
+
+Naming an exit that no traffic has ever used is what the first implementation did, and it
+reported the wrong IP; following Tor around its preemptive circuits is what made one
+instance appear to alternate between two exits.
+
+Step 1 is also why `PURPOSE=CONFLUX_LINKED` circuits count as exit-bearing alongside
+`GENERAL` ones. Conflux is on by default in current Tor, and its linked legs — which share
+an exit by construction — are what streams actually ride; a resolver that accepts only
+`GENERAL` reads the preemptive circuits and never the ones in use.
+
+Circuits older than the instance's last `NEWNYM` are excluded outright: that signal makes
+every existing circuit unusable for new streams, so their exits are no longer where the
+instance goes out. An **idle** instance builds no replacement — Tor waits for traffic — so
+after a rotation there is genuinely no current exit until the next request. The API reports
+none, and hands the discarded one over separately as `retired_exit_ip` so the dashboard can
+show what it was without claiming it is live.
 
 Because a stream only exists during a request, the exit is sampled shortly after a
 connection is established, debounced per instance, plus a slow background refresh.

@@ -165,19 +165,23 @@ func (s *Server) handlePoolResize(w http.ResponseWriter, r *http.Request) {
 
 // InstanceView is one instance as the API reports it.
 type InstanceView struct {
-	ID          int                  `json:"id"`
-	Ready       bool                 `json:"ready"`
-	Running     bool                 `json:"running"`
-	Bootstrap   int                  `json:"bootstrap"`
-	Pid         int                  `json:"pid"`
-	UptimeSecs  int                  `json:"uptime_secs"`
-	Sessions    int                  `json:"sessions"`
-	SocksAddr   string               `json:"socks_addr"`
-	ExitIP      string               `json:"exit_ip"`
-	ExitCountry string               `json:"exit_country"`
-	ExitNick    string               `json:"exit_nickname"`
-	Health      pool.HealthView      `json:"health"`
-	Totals      stats.InstanceTotals `json:"totals"`
+	ID          int    `json:"id"`
+	Ready       bool   `json:"ready"`
+	Running     bool   `json:"running"`
+	Bootstrap   int    `json:"bootstrap"`
+	Pid         int    `json:"pid"`
+	UptimeSecs  int    `json:"uptime_secs"`
+	Sessions    int    `json:"sessions"`
+	SocksAddr   string `json:"socks_addr"`
+	ExitIP      string `json:"exit_ip"`
+	ExitCountry string `json:"exit_country"`
+	ExitNick    string `json:"exit_nickname"`
+	// RetiredExitIP is set only while ExitIP is empty: a rotation discarded that
+	// exit and tor has not committed to a replacement, which for an idle
+	// instance lasts until its next request.
+	RetiredExitIP string               `json:"retired_exit_ip"`
+	Health        pool.HealthView      `json:"health"`
+	Totals        stats.InstanceTotals `json:"totals"`
 }
 
 func (s *Server) instanceViews() []InstanceView {
@@ -194,19 +198,20 @@ func (s *Server) instanceViews() []InstanceView {
 		node := inst.ExitNode()
 		id := inst.Index()
 		out = append(out, InstanceView{
-			ID:          id,
-			Ready:       inst.Ready(),
-			Running:     inst.Running(),
-			Bootstrap:   inst.Bootstrap(),
-			Pid:         inst.Pid(),
-			UptimeSecs:  int(time.Since(inst.StartedAt()).Seconds()),
-			Sessions:    counts[id],
-			SocksAddr:   inst.Config().SocksAddr(),
-			ExitIP:      node.Address,
-			ExitCountry: node.Country,
-			ExitNick:    node.Nickname,
-			Health:      health[id],
-			Totals:      collector.Instance(id),
+			ID:            id,
+			Ready:         inst.Ready(),
+			Running:       inst.Running(),
+			Bootstrap:     inst.Bootstrap(),
+			Pid:           inst.Pid(),
+			UptimeSecs:    int(time.Since(inst.StartedAt()).Seconds()),
+			Sessions:      counts[id],
+			SocksAddr:     inst.Config().SocksAddr(),
+			ExitIP:        node.Address,
+			ExitCountry:   node.Country,
+			ExitNick:      node.Nickname,
+			RetiredExitIP: inst.RetiredExit().Address,
+			Health:        health[id],
+			Totals:        collector.Instance(id),
 		})
 	}
 	return out

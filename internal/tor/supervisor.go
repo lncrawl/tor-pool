@@ -24,12 +24,25 @@ type Instance struct {
 	log   *slog.Logger
 	binry string
 
+	// ctrlMu serialises control-port commands. The protocol is one synchronous
+	// request/reply stream, so two overlapping commands read each other's
+	// replies. It is separate from mu because a command may block for a long
+	// time — Newnym waits out tor's cooldown — and mu must never be held across
+	// that.
+	ctrlMu sync.Mutex
+
 	mu        sync.Mutex
 	ctrl      *Control
 	bootstrap int
 	ready     bool
 	startedAt time.Time
 	exitNode  ExitNode
+
+	// retiredExit is the exit a rotation or restart just discarded. An idle
+	// instance builds no replacement circuit until traffic arrives, so this is
+	// kept purely so the operator can still see what it *was* — never as the
+	// current exit, which is genuinely unknown until the next request.
+	retiredExit ExitNode
 }
 
 // NewInstance prepares an instance. Nothing runs until Start is called.
@@ -118,6 +131,9 @@ func (i *Instance) Pid() int { return i.proc.Pid() }
 
 // Newnym requests a fresh circuit, waiting out tor's cooldown first.
 func (i *Instance) Newnym(ctx context.Context) error {
+	i.ctrlMu.Lock()
+	defer i.ctrlMu.Unlock()
+
 	i.mu.Lock()
 	ctrl := i.ctrl
 	i.mu.Unlock()
@@ -127,6 +143,12 @@ func (i *Instance) Newnym(ctx context.Context) error {
 	if err := ctrl.Newnym(ctx); err != nil {
 		return fmt.Errorf("instance %d newnym: %w", i.cfg.Index, err)
 	}
+
+	// The cached exit is not merely stale now, it is wrong: NEWNYM retired that
+	// circuit, so reporting it would name a relay this instance no longer goes
+	// out through.
+	i.retireExit()
+
 	i.log.Info("new circuit requested")
 	return nil
 }
@@ -148,6 +170,9 @@ func (i *Instance) NewnymWait() time.Duration {
 // This is read from tor's consensus view, so it costs no Tor bandwidth. It
 // fails harmlessly while no general-purpose circuit exists yet.
 func (i *Instance) RefreshExitNode() (ExitNode, error) {
+	i.ctrlMu.Lock()
+	defer i.ctrlMu.Unlock()
+
 	i.mu.Lock()
 	ctrl := i.ctrl
 	i.mu.Unlock()
@@ -161,8 +186,41 @@ func (i *Instance) RefreshExitNode() (ExitNode, error) {
 	}
 	i.mu.Lock()
 	i.exitNode = node
+	i.retiredExit = ExitNode{}
 	i.mu.Unlock()
 	return node, nil
+}
+
+// exitRetryInterval is how often AwaitExitNode retries while tor is still
+// building the circuit it will report.
+const exitRetryInterval = 250 * time.Millisecond
+
+// AwaitExitNode re-reads the exit relay, retrying until tor has a circuit worth
+// reporting or timeout elapses.
+//
+// Callers use this straight after a rotation: NEWNYM leaves the instance with no
+// reportable exit at all for a second or two, and waiting it out is the
+// difference between answering with the new exit and answering with nothing.
+func (i *Instance) AwaitExitNode(ctx context.Context, timeout time.Duration) (ExitNode, error) {
+	deadline := time.Now().Add(timeout)
+
+	ticker := time.NewTicker(exitRetryInterval)
+	defer ticker.Stop()
+
+	for {
+		node, err := i.RefreshExitNode()
+		if err == nil {
+			return node, nil
+		}
+		if time.Now().After(deadline) {
+			return ExitNode{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return ExitNode{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // ExitNode returns the last known exit relay, which may be zero if no circuit
@@ -173,8 +231,30 @@ func (i *Instance) ExitNode() ExitNode {
 	return i.exitNode
 }
 
+// RetiredExit returns the exit a rotation or restart discarded, if the
+// replacement is not known yet. It is zero once a current exit is resolved.
+func (i *Instance) RetiredExit() ExitNode {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.retiredExit
+}
+
+// retireExit moves the current exit aside: it is no longer where this instance
+// goes out, and nothing else is either until tor builds a circuit.
+func (i *Instance) retireExit() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.exitNode.Address != "" {
+		i.retiredExit = i.exitNode
+	}
+	i.exitNode = ExitNode{}
+}
+
 // SetExitPolicy applies exit-node selection at runtime.
 func (i *Instance) SetExitPolicy(exitNodes, excludeExitNodes string, strict bool) error {
+	i.ctrlMu.Lock()
+	defer i.ctrlMu.Unlock()
+
 	i.mu.Lock()
 	ctrl := i.ctrl
 	i.mu.Unlock()
@@ -230,9 +310,7 @@ func (i *Instance) Restart(ctx context.Context, wipeState bool) error {
 
 	// A Process cannot be restarted, so build a fresh one over the same config.
 	i.proc = NewProcess(i.binry, i.cfg, i.onTorLog)
-	i.mu.Lock()
-	i.exitNode = ExitNode{}
-	i.mu.Unlock()
+	i.retireExit()
 
 	return i.Start(ctx)
 }

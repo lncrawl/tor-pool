@@ -54,7 +54,8 @@ Two traps:
 | Key | Returns | Notes |
 | --- | --- | --- |
 | `status/bootstrap-phase` | `NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="Done"` | Parse `PROGRESS=`. **Not monotonic** — it can fall back after a connection loss, so never treat a decrease as an error |
-| `circuit-status` | one line per circuit, oldest first | Multi-line `+` payload |
+| `circuit-status` | one line per circuit | Multi-line `+` payload. Each line ends with optional key=value fields, of which `TIME_CREATED=` is the one that dates a circuit — **do not infer age from list order** |
+| `stream-status` | one line per stream: `<id> SUCCEEDED <circuitID> host:port` | `NEW`/`NEWRESOLVE` streams carry circuit id `0` |
 | `ns/id/<fingerprint>` | consensus entry for a relay | The `r` line's 7th field is the IP |
 | `ip-to-country/<ip>` | two-letter country code | Needs the GeoIP databases; Alpine's `tor` package ships them at `/usr/share/tor`, so no extra package is required |
 
@@ -64,13 +65,40 @@ line is `OK` — which must be stripped before use.
 ## Resolving the exit relay
 
 ```
-circuit-status  →  newest BUILT + PURPOSE=GENERAL circuit  →  last hop  →  ns/id/<fp>  →  IP
-                                                                       →  ip-to-country/<IP>
+circuit-status + stream-status  →  one chosen circuit  →  last hop  →  ns/id/<fp>  →  IP
+                                                                   →  ip-to-country/<IP>
 ```
+
+An instance has **several** BUILT general-purpose circuits at once, so the hard part is not
+parsing, it is choosing — and choosing the same one next time. `selectExit` picks, in order:
+
+1. the circuit carrying a stream (`stream-status`) — the only one tor has committed traffic to;
+2. the exit reported last time, while a circuit to it still stands;
+3. the newest circuit by `TIME_CREATED`.
+
+Step 2 is not an optimisation. Tor builds circuits preemptively, so a resolver that always takes
+the newest reports an exit no traffic has used and **flaps between relays on consecutive polls**
+while nothing about the instance has changed. That was a real bug; keep the choice sticky.
 
 Details that matter:
 
-- Circuits are listed **oldest first**, so the newest match is the *last* one, not the first.
+- **`PURPOSE=CONFLUX_LINKED` circuits carry exit traffic and must be accepted.** Conflux is on
+  by default in current tor: streams ride linked conflux legs, while the `GENERAL` circuits
+  sitting alongside them are usually preemptive. Legs of one set share their exit relay, so they
+  all resolve to the same answer. Accepting only `GENERAL` is how the resolver ends up naming an
+  exit no traffic uses.
+- **`IS_INTERNAL` in `BUILD_FLAGS` means no exit hop**, whatever the purpose says — that is how
+  `HS_VANGUARDS` circuits show up.
+- **Circuits built before the last NEWNYM are excluded.** That signal marks every existing
+  circuit unusable for new streams — clean and dirty alike — so their exits are no longer where
+  the instance goes out.
+- **After a NEWNYM an idle instance has no exit at all, and not briefly.** Tor does not
+  pre-build a replacement without traffic to predict, and the retired circuits linger as `BUILT`
+  meanwhile, so the honest answer stays "unknown" until the next request. Do not paper over it by
+  reporting the retired exit, and do not reach for `EXTENDCIRCUIT 0`: a controller-built circuit
+  is not used for ordinary streams and is closed again shortly after.
+- `TIME_CREATED` is `2006-01-02T15:04:05.999999` with **no zone suffix and always UTC**. Parsing
+  it as local time silently misdates every circuit.
 - Filter on `PURPOSE=GENERAL`. Hidden-service circuits (`HS_CLIENT_INTRO`, …) have no exit in
   the sense we mean.
 - Skip anything not `BUILT`; `LAUNCHED` circuits have no usable path yet.
@@ -79,13 +107,13 @@ Details that matter:
 - This resolution reads tor's own consensus view, so it costs **no Tor bandwidth**, unlike
   fetching an IP-echo URL through the circuit.
 
-**What this value actually means.** It is *an* exit currently in use, not a fixed identity for the
-instance. Tor multiplexes streams over several circuits and retires them (`MaxCircuitDirtiness`,
-10 minutes by default), so a request made moments after reading `circuit-status` can legitimately
-exit somewhere else. Report it as "current exit", never as a guarantee about the next request.
+**What this value actually means.** It is *an* exit currently in use, not a guarantee about the
+next request: tor retires circuits on its own schedule (`MaxCircuitDirtiness`, set in
+`internal/config`). Report it as "current exit".
 
-Expect failure before a circuit exists: right after bootstrap there may be no BUILT general
-circuit at all. That is a normal transient, not an error worth surfacing to the user.
+Expect failure before a circuit exists: right after bootstrap, and right after a NEWNYM, there
+may be no eligible circuit at all. That is a normal transient, not an error worth surfacing to
+the user — but it must read as "unknown", never as the previous exit.
 
 ## NEWNYM and its cooldown
 
@@ -109,7 +137,9 @@ Use `Control.Newnym(ctx)`, which waits out the remaining cooldown, rather than
 `Signal("NEWNYM")` directly.
 
 NEWNYM also does not touch **existing** connections — it only affects circuits built afterwards.
-A client holding a live proxy connection keeps its old exit until it reconnects.
+A client holding a live proxy connection keeps its old exit until it reconnects. The pre-NEWNYM
+circuits stay listed as `BUILT` for a while too, which is why the exit resolver dates circuits
+against the last NEWNYM instead of trusting whatever is in `circuit-status`.
 
 ## SETCONF
 

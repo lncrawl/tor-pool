@@ -38,6 +38,9 @@ export interface Instance {
   exit_ip: string;
   exit_country: string;
   exit_nickname: string;
+  // Set only while exit_ip is empty: the exit a rotation discarded, with no
+  // replacement committed to yet.
+  retired_exit_ip: string;
   health: Health;
   totals: InstanceTotals;
 }

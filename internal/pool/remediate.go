@@ -127,8 +127,9 @@ func (p *Pool) remediate(ctx context.Context, instance int) {
 		return
 	}
 
-	// The exit relay is stale after either rung.
-	if _, err := inst.RefreshExitNode(); err != nil {
+	// The exit relay is stale after either rung, and tor needs a moment to build
+	// the circuit that replaces it.
+	if _, err := inst.AwaitExitNode(ctx, exitSettleTimeout); err != nil {
 		log.Debug("exit node not resolvable after remediation", "error", err)
 	}
 
@@ -221,10 +222,11 @@ func (p *Pool) RotateInstance(instance int) error {
 	if !ok {
 		return errors.New("no such instance")
 	}
-	if err := inst.Newnym(p.poolCtx()); err != nil {
+	ctx := p.poolCtx()
+	if err := inst.Newnym(ctx); err != nil {
 		return err
 	}
-	if _, err := inst.RefreshExitNode(); err != nil {
+	if _, err := inst.AwaitExitNode(ctx, exitSettleTimeout); err != nil {
 		p.log.Debug("exit node not resolvable after rotate", "instance", instance, "error", err)
 	}
 	return nil

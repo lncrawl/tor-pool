@@ -47,6 +47,7 @@ seconds to fully land.
   "id": 0, "ready": true, "running": true, "bootstrap": 100, "pid": 15,
   "uptime_secs": 3612, "sessions": 3, "socks_addr": "127.0.0.1:19000",
   "exit_ip": "185.220.101.5", "exit_country": "DE", "exit_nickname": "SomeRelay",
+  "retired_exit_ip": "",
   "health": {
     "state": "healthy", "failures_in_window": 0, "consecutive_failures": 0,
     "transport_failures": 2, "client_failures": 1,
@@ -58,7 +59,13 @@ seconds to fully land.
 
 `exit_ip` is the exit **currently in use**, read from Tor's own consensus view and
 sampled while a connection is live. It is not a promise about the next request: Tor
-retires circuits on its own schedule.
+retires circuits on its own schedule. It is **empty** whenever the instance has no circuit
+whose exit it can name — before bootstrap finishes, and after a rotation, because a
+rotation discards the exit and Tor picks the replacement only when traffic arrives. On an
+idle instance that state lasts until its next request.
+
+`retired_exit_ip` is set only in that window, and carries the exit the rotation discarded
+so a dashboard can show what it *was*. Never read it as the current exit.
 
 `state` is one of `starting`, `healthy`, `degraded`, `probation`, `quarantined`,
 `remediating`.

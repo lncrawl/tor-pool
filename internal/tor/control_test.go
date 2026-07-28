@@ -115,42 +115,6 @@ func TestBootstrapPercent(t *testing.T) {
 	}
 }
 
-func TestNewestExitFingerprint(t *testing.T) {
-	status := strings.Join([]string{
-		"1 BUILT $AAAA~first PURPOSE=GENERAL",
-		"2 LAUNCHED $ZZZZ~pending PURPOSE=GENERAL",
-		"3 BUILT $BBBB~mid,$CCCC~exit PURPOSE=GENERAL",
-		"4 BUILT $DDDD~internal PURPOSE=HS_CLIENT_INTRO",
-	}, "\n")
-
-	fp, err := newestExitFingerprint(status)
-	if err != nil {
-		t.Fatalf("newestExitFingerprint: %v", err)
-	}
-	// Newest BUILT *general* circuit is #3, whose last hop is CCCC. Circuit 4
-	// is a hidden-service circuit and must be ignored.
-	if fp != "CCCC" {
-		t.Errorf("fingerprint = %q, want CCCC", fp)
-	}
-}
-
-func TestNewestExitFingerprintNoCircuits(t *testing.T) {
-	if _, err := newestExitFingerprint("2 LAUNCHED $ZZZZ~pending PURPOSE=GENERAL"); err == nil {
-		t.Fatal("expected an error when nothing is built yet")
-	}
-}
-
-func TestNewestExitFingerprintHandlesEqualsSeparator(t *testing.T) {
-	// Named relays use '=' instead of '~' before the nickname.
-	fp, err := newestExitFingerprint("1 BUILT $AAAA~a,$EEEE=namedexit PURPOSE=GENERAL")
-	if err != nil {
-		t.Fatalf("newestExitFingerprint: %v", err)
-	}
-	if fp != "EEEE" {
-		t.Errorf("fingerprint = %q, want EEEE", fp)
-	}
-}
-
 func TestParseNetworkStatus(t *testing.T) {
 	desc := "r SomeExit AAAAB3Nza dGVzdA== 2026-07-27 12:00:00 185.220.101.5 9001 9030\ns Exit Fast Running"
 	node := parseNetworkStatus(desc)
