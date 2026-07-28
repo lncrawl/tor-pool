@@ -17,9 +17,13 @@ version="${version#v}"
 
 changelog="$(dirname "$0")/../CHANGELOG.md"
 
+# Stops at the next version heading, or at the link definitions in the footer —
+# the oldest section runs into those, and they belong to the file rather than to
+# any one release.
 notes=$(awk -v version="$version" '
 	$0 ~ "^## \\[" version "\\]" { found = 1; next }
 	found && /^## / { exit }
+	found && /^\[[^]]+\]:/ { exit }
 	found { print }
 ' "$changelog")
 

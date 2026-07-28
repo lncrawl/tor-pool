@@ -9,6 +9,51 @@ means.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-28
+
+The first release with notes. The earlier `v0.0.x` tags were created automatically by
+every push to `main`, so their numbers counted pushes rather than changes and none of
+them was ever accompanied by an entry here — this release is also where that stopped.
+
+### Added
+
+- A pool of Tor instances in one container, behind a single sticky SOCKS5 and HTTP proxy
+  endpoint.
+- **Sticky sessions.** The SOCKS5 username (or `Proxy-Authorization` user) is a session
+  key; a caller keeps the same instance, and so the same exit IP, until it rotates.
+  Callers with no credentials are pinned by client IP.
+- **Instant rotation.** `POST /api/sessions/{key}/rotate` reassigns a session to an
+  already-built instance, skipping Tor's ~10s NEWNYM cooldown.
+- **Failure-driven remediation.** Failures are counted per instance from transport
+  errors and from client reports, and a bad instance escalates through new circuit →
+  wipe-restart → restart with exponential backoff.
+- **Management dashboard** with live updates over SSE: instance grid with per-instance
+  actions, sessions view, filterable audit log, and timeline charts.
+- **REST API** for instances, sessions, events and history, plus live pool resize.
+- Prometheus metrics at `/metrics`, and a `/health` check that reports routability
+  rather than process health.
+- Multi-arch images (`linux/amd64`, `linux/arm64`) on `ghcr.io/lncrawl/tor-pool`.
+- **`PIN_EXIT_RELAY`** locks each instance to a single exit relay, so one instance really
+  is one exit IP until it rotates. Off by default: a pinned instance depends on one relay.
+- **`BOOTSTRAP_STALL_TIMEOUT`** restarts an instance that stops making bootstrap progress,
+  keeping its state on the first attempt and wiping it on the next.
+- `exit_confirmed` and `pinned_exit` on the instance API, surfaced in the dashboard: an
+  exit no traffic has used yet is shown as the guess it is.
+
+### Changed
+
+- **`latest` now means the newest release, not the last push to `main`.** Every push used
+  to bump a patch tag and move `latest`, so a README fix became a version number and
+  unreleased work reached everyone tracking `latest`. Pushes to `main` publish `edge`;
+  releases are cut deliberately from `CHANGELOG.md`. The weekly rebuild is gone with it —
+  `tor` now updates when you pull a newer image rather than on a timer.
+- **Conflux is off by default** (`TOR_CONFLUX`). Each set Tor pre-builds has its own exit
+  relay and successive requests land on different sets, so one instance handed a caller
+  several exit IPs with no rotation at all.
+- **`POST /api/instances/{id}/rotate` returns as soon as the instance is out of service**,
+  finishing Tor's cooldown in the background, instead of holding the request open for up to
+  ~13 seconds.
+
 ### Fixed
 
 - **Rotation no longer drops requests in flight.** Retiring an instance's circuits spared
@@ -63,42 +108,5 @@ means.
 - Fixed data races on an instance's process handle during a restart, and on the NEWNYM
   cooldown timestamp.
 
-### Changed
-
-- **`latest` now means the newest release, not the last push to `main`.** Every push used
-  to bump a patch tag and move `latest`, so a README fix became a version number and
-  unreleased work reached everyone tracking `latest`. Pushes to `main` publish `edge`;
-  releases are cut deliberately from `CHANGELOG.md`. The weekly rebuild is gone with it —
-  `tor` now updates when you pull a newer image rather than on a timer.
-- **Conflux is off by default** (`TOR_CONFLUX`). Each set Tor pre-builds has its own exit
-  relay and successive requests land on different sets, so one instance handed a caller
-  several exit IPs with no rotation at all.
-- **`POST /api/instances/{id}/rotate` returns as soon as the instance is out of service**,
-  finishing Tor's cooldown in the background, instead of holding the request open for up to
-  ~13 seconds.
-
-### Added
-
-- **`PIN_EXIT_RELAY`** locks each instance to a single exit relay, so one instance really
-  is one exit IP until it rotates. Off by default: a pinned instance depends on one relay.
-- **`BOOTSTRAP_STALL_TIMEOUT`** restarts an instance that stops making bootstrap progress,
-  keeping its state on the first attempt and wiping it on the next.
-- `exit_confirmed` and `pinned_exit` on the instance API, surfaced in the dashboard: an
-  exit no traffic has used yet is shown as the guess it is.
-
-- Initial release. A pool of Tor instances in one container, behind a single sticky
-  SOCKS5 and HTTP proxy endpoint.
-- **Sticky sessions.** The SOCKS5 username (or `Proxy-Authorization` user) is a session
-  key; a caller keeps the same instance, and so the same exit IP, until it rotates.
-  Callers with no credentials are pinned by client IP.
-- **Instant rotation.** `POST /api/sessions/{key}/rotate` reassigns a session to an
-  already-built instance, skipping Tor's ~10s NEWNYM cooldown.
-- **Failure-driven remediation.** Failures are counted per instance from transport
-  errors and from client reports, and a bad instance escalates through new circuit →
-  wipe-restart → restart with exponential backoff.
-- **Management dashboard** with live updates over SSE: instance grid with per-instance
-  actions, sessions view, filterable audit log, and timeline charts.
-- **REST API** for instances, sessions, events and history, plus live pool resize.
-- Prometheus metrics at `/metrics`, and a `/health` check that reports routability
-  rather than process health.
-- Multi-arch images (`linux/amd64`, `linux/arm64`) on `ghcr.io/lncrawl/tor-pool`.
+[unreleased]: https://github.com/lncrawl/tor-pool/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.1.0
