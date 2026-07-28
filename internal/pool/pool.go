@@ -60,7 +60,13 @@ const (
 	// circuit that replaces the one it just retired. Until then the instance has
 	// no exit to report at all, and answering the caller with the pre-rotation
 	// exit would be answering with a relay it no longer uses.
-	exitSettleTimeout = 3 * time.Second
+	//
+	// Generous, because nothing waits on it: the rotation is acknowledged before
+	// this runs, and an instance still counts as rotating until it finishes — so
+	// the only thing a longer budget costs is steering callers to instances that
+	// can already serve them. A shorter one released the instance while tor was
+	// still building, and its next caller paid for the build instead.
+	exitSettleTimeout = 10 * time.Second
 
 	// exitRefreshInterval is how often each instance's exit relay is re-read.
 	//
