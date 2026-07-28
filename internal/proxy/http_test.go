@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -131,7 +132,14 @@ func serveFakeTor(conn net.Conn) {
 func newProxyServer(t *testing.T, router Router) *Server {
 	t.Helper()
 	cfg := config.Defaults()
-	return NewServer(&cfg, router, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewServer(&cfg, router, acceptToken, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// proxyAuth is the Proxy-Authorization header for a session, carrying the
+// credential the fake verifier accepts.
+func proxyAuth(session string) string {
+	return "Proxy-Authorization: Basic " +
+		base64.StdEncoding.EncodeToString([]byte(session+":"+testToken)) + "\r\n"
 }
 
 func TestHTTPProxyRoutesEachKeepAliveRequest(t *testing.T) {
@@ -145,7 +153,7 @@ func TestHTTPProxyRoutesEachKeepAliveRequest(t *testing.T) {
 	go s.handleHTTP(context.Background(), server)
 
 	send := func(url, host string) {
-		fmt.Fprintf(client, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", url, host)
+		fmt.Fprintf(client, "GET %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", url, host, proxyAuth("sess"))
 	}
 	br := bufio.NewReader(client)
 	read := func() string {
@@ -197,6 +205,119 @@ func TestHTTPProxyRoutesEachKeepAliveRequest(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyRefusesRequestsWithoutACredential(t *testing.T) {
+	router := &fakeRouter{addr: fakeTor(t)}
+	s := newProxyServer(t, router)
+
+	client, server := newClientServer(t)
+	go s.handleHTTP(context.Background(), server)
+
+	fmt.Fprint(client, "GET http://alpha.example/one HTTP/1.1\r\nHost: alpha.example\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 407, not 401: this is the proxy refusing, not an origin server.
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want 407", resp.StatusCode)
+	}
+	// RFC 9110 §15.5.8 makes the challenge a MUST. Without it curl and browsers
+	// never re-send credentials and report a protocol violation instead.
+	if challenge := resp.Header.Get("Proxy-Authenticate"); !strings.HasPrefix(challenge, "Basic ") {
+		t.Errorf("Proxy-Authenticate = %q, want a Basic challenge", challenge)
+	}
+
+	// Nothing was routed, so no instance was involved and none may be blamed.
+	routes, finished, failures := router.counts()
+	if routes != 0 || finished != 0 || failures != 0 {
+		t.Errorf("routed %d, finished %d, failures %d — a refused request must touch no instance",
+			routes, finished, failures)
+	}
+}
+
+func TestHTTPProxyRefusesBadCredentials(t *testing.T) {
+	cases := map[string]string{
+		"wrong password":  "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("sess:wrong")) + "\r\n",
+		"no colon":        "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("sess")) + "\r\n",
+		"not base64":      "Proxy-Authorization: Basic !!!!\r\n",
+		"wrong scheme":    "Proxy-Authorization: Bearer " + testToken + "\r\n",
+		"empty password":  "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("sess:")) + "\r\n",
+		"session as pass": "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(testToken+":sess")) + "\r\n",
+	}
+	for name, header := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newProxyServer(t, &fakeRouter{addr: fakeTor(t)})
+			client, server := newClientServer(t)
+			go s.handleHTTP(context.Background(), server)
+
+			fmt.Fprintf(client, "GET http://alpha.example/ HTTP/1.1\r\nHost: alpha.example\r\n%s\r\n", header)
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusProxyAuthRequired {
+				t.Errorf("status = %d, want 407", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// A keep-alive client can drop the header on its second request. Checking only the
+// first would let that one ride on the first request's credential.
+func TestHTTPProxyChecksEveryKeepAliveRequest(t *testing.T) {
+	s := newProxyServer(t, &fakeRouter{addr: fakeTor(t)})
+	client, server := newClientServer(t)
+	go s.handleHTTP(context.Background(), server)
+
+	br := bufio.NewReader(client)
+
+	fmt.Fprintf(client, "GET http://alpha.example/one HTTP/1.1\r\nHost: alpha.example\r\n%s\r\n",
+		proxyAuth("sess"))
+	first, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read first response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, first.Body)
+	first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.StatusCode)
+	}
+
+	fmt.Fprint(client, "GET http://alpha.example/two HTTP/1.1\r\nHost: alpha.example\r\n\r\n")
+	second, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read second response: %v", err)
+	}
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("second status = %d, want 407 — the credential is per request", second.StatusCode)
+	}
+}
+
+func TestHTTPProxyRefusesCONNECTWithoutACredential(t *testing.T) {
+	s := newProxyServer(t, &fakeRouter{addr: fakeTor(t)})
+	client, server := newClientServer(t)
+	go s.handleHTTP(context.Background(), server)
+
+	// A tunnel with no credential must be refused before it is established, not
+	// answered with 200 and then failed.
+	fmt.Fprint(client, "CONNECT alpha.example:443 HTTP/1.1\r\nHost: alpha.example:443\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("status = %d, want 407", resp.StatusCode)
+	}
+	if resp.Header.Get("Proxy-Authenticate") == "" {
+		t.Error("407 without a Proxy-Authenticate challenge")
+	}
+}
+
 func TestHTTPProxyStripsHopByHopHeaders(t *testing.T) {
 	var sent strings.Builder
 	upstream := &recordingConn{sb: &sent}
@@ -217,8 +338,9 @@ func TestHTTPProxyStripsHopByHopHeaders(t *testing.T) {
 	}
 	wire := sent.String()
 
-	// Proxy-Authorization carries the session key; forwarding it hands every
-	// visited site the key that names this caller's exit identity.
+	// Proxy-Authorization now carries the credential itself, so forwarding it
+	// would hand every visited site a working proxy token — it used to leak only
+	// the session name.
 	for _, header := range []string{"Proxy-Authorization", "Proxy-Connection", "Connection:"} {
 		if strings.Contains(wire, header) {
 			t.Errorf("%s reached the origin:\n%s", header, wire)
@@ -278,3 +400,31 @@ func (c *recordingConn) Write(b []byte) (int, error) { return c.sb.Write(b) }
 
 // unused, but keeps encoding/binary imported for the SOCKS helper above.
 var _ = binary.BigEndian
+
+// A destination tor was never going to reach must not be blamed on the instance.
+//
+// Found by the SSRF check in the auth work: three requests for 127.0.0.1 refused
+// by tor were enough to quarantine a healthy instance under the default
+// thresholds, and enough of them empty the pool. The refusal is the caller's
+// fault, not the circuit's.
+func TestUnroutableTargetsAreNotScored(t *testing.T) {
+	unroutable := []string{
+		"127.0.0.1", "::1", "10.1.2.3", "192.168.1.1", "172.16.0.1",
+		"169.254.1.1", "0.0.0.0", "224.0.0.1", "fd00::1", "fe80::1",
+	}
+	for _, host := range unroutable {
+		if !unroutableTarget(target{host: host, port: 80}) {
+			t.Errorf("%s should not be scored against an instance", host)
+		}
+	}
+
+	// Public literals and hostnames stay the instance's problem: a name that
+	// will not resolve really can mean a broken circuit.
+	for _, host := range []string{
+		"93.184.216.34", "1.1.1.1", "2606:4700::1111", "example.com", "localhost",
+	} {
+		if unroutableTarget(target{host: host, port: 80}) {
+			t.Errorf("%s should still be scored — it is not unroutable by construction", host)
+		}
+	}
+}

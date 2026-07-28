@@ -13,6 +13,11 @@ import (
 //
 // A session is an identity hint, not a security boundary: many callers may
 // present the same key, and they then deliberately share an instance.
+//
+// That stayed true when the proxy gained credentials, and now needs saying out
+// loud rather than being obvious. A token decides whether a caller may use the
+// pool at all; it does not partition it. Any valid token may claim any key, so
+// sessions separate exit identities, not tenants.
 type Session struct {
 	Key       string    `json:"key"`
 	Instance  int       `json:"instance"`

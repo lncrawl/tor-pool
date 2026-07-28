@@ -69,7 +69,24 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn) {
 			return
 		}
 
-		key := s.sessionKey(proxyAuthSession(req), client)
+		// Authenticated per request, not per connection: a keep-alive client can
+		// change or drop Proxy-Authorization on its second request, and checking
+		// only the first would let that one ride on the first one's credential.
+		//
+		// Checked before routing, which also means an unauthenticated caller
+		// cannot claim a session and consume a MAX_SESSIONS entry (invariant 11).
+		supplied, secret, ok := proxyAuthCredential(req)
+		if !ok || s.verify(secret) != nil {
+			// Nothing was routed, so no instance is scored and Finish is not
+			// called. Logged to stderr rather than the bounded event ring, which a
+			// flood of refusals would otherwise wipe.
+			s.log.Warn("http proxy credential refused",
+				"remote", remoteHost(client), "method", req.Method)
+			writeProxyAuthRequired(client)
+			return
+		}
+
+		key := s.sessionKey(supplied, client)
 		tgt, err := httpTarget(req)
 		if err != nil {
 			// A request with no absolute URI is a browser talking to us as if we
@@ -328,22 +345,51 @@ func forwardRequest(upstream net.Conn, req *http.Request) error {
 	return nil
 }
 
-// proxyAuthSession extracts a session key from Proxy-Authorization.
+// proxyAuthCredential splits Proxy-Authorization into the session key and the
+// credential.
 //
-// The password is ignored, exactly as with SOCKS credentials: the username is an
-// identity hint, not an access control mechanism.
-func proxyAuthSession(req *http.Request) string {
-	header := req.Header.Get("Proxy-Authorization")
-	encoded, ok := strings.CutPrefix(header, "Basic ")
-	if !ok {
-		return ""
+// Exactly as with SOCKS5: the username names the session and the password is the
+// token. The header never reaches the origin server — it is stripped as
+// hop-by-hop in forwardRequest, which is now protecting a credential rather than
+// just a session name.
+func proxyAuthCredential(req *http.Request) (sessionKey, secret string, ok bool) {
+	scheme, encoded, found := strings.Cut(req.Header.Get("Proxy-Authorization"), " ")
+	// The scheme is case-insensitive per RFC 9110 §11.1.
+	if !found || !strings.EqualFold(scheme, "Basic") {
+		return "", "", false
 	}
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
 	if err != nil {
-		return ""
+		return "", "", false
 	}
-	user, _, _ := strings.Cut(string(decoded), ":")
-	return user
+	user, pass, found := strings.Cut(string(decoded), ":")
+	if !found {
+		return "", "", false
+	}
+	return user, pass, true
+}
+
+// writeProxyAuthRequired refuses a request that carried no usable credential.
+//
+// 407 rather than 401, and the Proxy-Authenticate header is a MUST on it (RFC
+// 9110 §15.5.8): without the challenge, curl and browsers never re-send
+// credentials and report a protocol violation instead. writeHTTPError cannot
+// express an extra header, which is why this exists alongside it.
+//
+// The connection closes rather than staying open for a retry. A client that has
+// credentials sends them preemptively and never sees this, and one that does not
+// would otherwise be free to hold a goroutine for the whole idle timeout sending
+// unauthenticated requests.
+func writeProxyAuthRequired(conn net.Conn) {
+	const body = "proxy credentials required\n"
+	_, _ = fmt.Fprintf(conn,
+		"HTTP/1.1 %d %s\r\n"+
+			"Proxy-Authenticate: Basic realm=\"tor-pool\", charset=\"UTF-8\"\r\n"+
+			"Content-Type: text/plain; charset=utf-8\r\n"+
+			"Content-Length: %d\r\n"+
+			"Connection: close\r\n\r\n%s",
+		http.StatusProxyAuthRequired, http.StatusText(http.StatusProxyAuthRequired),
+		len(body), body)
 }
 
 func writeHTTPError(conn net.Conn, status int, message string) {

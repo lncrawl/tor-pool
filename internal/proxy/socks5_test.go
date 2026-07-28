@@ -33,20 +33,47 @@ func drain(w io.Reader, n int) {
 	_, _ = io.ReadFull(w, make([]byte, n))
 }
 
-func TestNegotiateAuthPrefersUserPass(t *testing.T) {
+// testToken is the only credential acceptToken accepts.
+const testToken = "tp_ExampleTokenAAAAAAA"
+
+// acceptToken stands in for the real verifier. The handshake depends on nothing
+// more than this function, which is why these tests need no credential store.
+func acceptToken(secret string) error {
+	if secret != testToken {
+		return errors.New("unauthorized")
+	}
+	return nil
+}
+
+// collect reads n bytes of server reply in the background and hands them back, so
+// a test can assert on the exact bytes instead of merely draining them. net.Pipe
+// is synchronous, so the read has to happen while the server is still writing.
+func collect(conn io.Reader, n int) <-chan []byte {
+	out := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, n)
+		_, _ = io.ReadFull(conn, buf)
+		out <- buf
+	}()
+	return out
+}
+
+func TestNegotiateAuthReadsTheSessionKeyAndChecksThePassword(t *testing.T) {
 	client, server := newClientServer(t)
 
 	go func() {
-		// Offer both; the server must choose user/pass to learn the session key.
+		// Offering both is what every real client does; the server must still
+		// choose user/pass, because that is where the credential is.
 		_, _ = client.Write([]byte{socks5Version, 2, authNone, authUserPass})
 		drain(client, 2) // method selection
 		_, _ = client.Write([]byte{userPassVersion, 6})
 		_, _ = client.Write([]byte("sess-a"))
-		_, _ = client.Write([]byte{1, 'x'})
+		_, _ = client.Write([]byte{byte(len(testToken))})
+		_, _ = client.Write([]byte(testToken))
 		drain(client, 2) // auth status
 	}()
 
-	key, err := negotiateAuth(server)
+	key, err := negotiateAuth(server, acceptToken)
 	if err != nil {
 		t.Fatalf("negotiateAuth: %v", err)
 	}
@@ -55,7 +82,30 @@ func TestNegotiateAuthPrefersUserPass(t *testing.T) {
 	}
 }
 
-func TestNegotiateAuthAcceptsEmptyPassword(t *testing.T) {
+// An empty username is still valid: it says "no named session", so the caller
+// falls back to DEFAULT_SESSION. The password is what is being checked.
+func TestNegotiateAuthAcceptsAnEmptyUsername(t *testing.T) {
+	client, server := newClientServer(t)
+
+	go func() {
+		_, _ = client.Write([]byte{socks5Version, 1, authUserPass})
+		drain(client, 2)
+		_, _ = client.Write([]byte{userPassVersion, 0}) // no username
+		_, _ = client.Write([]byte{byte(len(testToken))})
+		_, _ = client.Write([]byte(testToken))
+		drain(client, 2)
+	}()
+
+	key, err := negotiateAuth(server, acceptToken)
+	if err != nil {
+		t.Fatalf("negotiateAuth: %v", err)
+	}
+	if key != "" {
+		t.Errorf("session key = %q, want empty so the caller applies DEFAULT_SESSION", key)
+	}
+}
+
+func TestNegotiateAuthRefusesAnEmptyPassword(t *testing.T) {
 	client, server := newClientServer(t)
 
 	go func() {
@@ -67,29 +117,55 @@ func TestNegotiateAuthAcceptsEmptyPassword(t *testing.T) {
 		drain(client, 2)
 	}()
 
-	key, err := negotiateAuth(server)
-	if err != nil {
-		t.Fatalf("negotiateAuth: %v", err)
-	}
-	if key != "only" {
-		t.Errorf("session key = %q, want only", key)
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
+		t.Fatal("a zero-length password was accepted")
 	}
 }
 
-func TestNegotiateAuthFallsBackToNone(t *testing.T) {
+func TestNegotiateAuthRefusesAWrongPassword(t *testing.T) {
 	client, server := newClientServer(t)
 
 	go func() {
-		_, _ = client.Write([]byte{socks5Version, 1, authNone})
-		drain(client, 2)
+		_, _ = client.Write([]byte{socks5Version, 1, authUserPass})
+		_, _ = client.Write([]byte{userPassVersion, 4})
+		_, _ = client.Write([]byte("sess"))
+		_, _ = client.Write([]byte{5})
+		_, _ = client.Write([]byte("wrong"))
 	}()
+	// Both replies in one read: a second reader on the pipe would race this one
+	// for the method selection.
+	got := collect(client, 4)
 
-	key, err := negotiateAuth(server)
-	if err != nil {
-		t.Fatalf("negotiateAuth: %v", err)
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
+		t.Fatal("a wrong password was accepted")
 	}
-	if key != "" {
-		t.Errorf("session key = %q, want empty so the caller applies DEFAULT_SESSION", key)
+
+	// RFC 1929's failure reply, and the byte order that matters: the first byte
+	// is the sub-negotiation version, not socks5Version. Writing 0x05 here is the
+	// classic transposition, and it surfaces to the client as a protocol fault
+	// rather than a refused password.
+	reply := <-got
+	want := []byte{socks5Version, authUserPass, userPassVersion, userPassFailure}
+	if !bytes.Equal(reply, want) {
+		t.Errorf("reply = %v, want %v", reply, want)
+	}
+}
+
+// Falling back to "no authentication" would bypass the credential entirely, so a
+// client that offers only that is refused.
+func TestNegotiateAuthRefusesNoAuthOnly(t *testing.T) {
+	client, server := newClientServer(t)
+
+	go func() { _, _ = client.Write([]byte{socks5Version, 1, authNone}) }()
+	got := collect(client, 2)
+
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
+		t.Fatal("a client offering only 'no authentication' was accepted")
+	}
+	// 0xFF is RFC 1928's "no acceptable method", after which the client closes.
+	want := []byte{socks5Version, authNoAcceptable}
+	if reply := <-got; !bytes.Equal(reply, want) {
+		t.Errorf("reply = %v, want %v", reply, want)
 	}
 }
 
@@ -101,7 +177,7 @@ func TestNegotiateAuthRejectsUnknownMethods(t *testing.T) {
 		drain(client, 2)
 	}()
 
-	if _, err := negotiateAuth(server); err == nil {
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
 		t.Fatal("expected an error when no acceptable method is offered")
 	}
 }
@@ -111,7 +187,7 @@ func TestNegotiateAuthRejectsWrongVersion(t *testing.T) {
 
 	go func() { _, _ = client.Write([]byte{0x04, 1, authNone}) }()
 
-	if _, err := negotiateAuth(server); err == nil {
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
 		t.Fatal("expected an error for SOCKS4")
 	}
 }
@@ -121,8 +197,37 @@ func TestNegotiateAuthRejectsZeroMethods(t *testing.T) {
 
 	go func() { _, _ = client.Write([]byte{socks5Version, 0}) }()
 
-	if _, err := negotiateAuth(server); err == nil {
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
 		t.Fatal("expected an error when the client offers no methods")
+	}
+}
+
+// A refused credential must not be answered with the 10-byte connect reply: it
+// belongs to a request that has not been read, and sending one desynchronises the
+// client. Only the 2-byte auth status goes out.
+func TestNegotiateAuthSendsNoConnectReplyOnRefusal(t *testing.T) {
+	client, server := newClientServer(t)
+
+	go func() {
+		_, _ = client.Write([]byte{socks5Version, 1, authUserPass})
+		_, _ = client.Write([]byte{userPassVersion, 1})
+		_, _ = client.Write([]byte("s"))
+		_, _ = client.Write([]byte{3})
+		_, _ = client.Write([]byte("bad"))
+	}()
+	// Method selection plus the auth status: everything the server should send.
+	got := collect(client, 4)
+
+	if _, err := negotiateAuth(server, acceptToken); err == nil {
+		t.Fatal("a wrong password was accepted")
+	}
+	<-got
+
+	// Nothing more may follow. A short read deadline distinguishes "no further
+	// bytes" from "the test is hanging".
+	_ = client.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if n, _ := client.Read(make([]byte, 16)); n != 0 {
+		t.Errorf("server sent %d extra bytes after the auth failure", n)
 	}
 }
 

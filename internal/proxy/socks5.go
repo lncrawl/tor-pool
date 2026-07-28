@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 )
 
@@ -22,6 +23,11 @@ const (
 
 	userPassVersion = 0x01
 	userPassSuccess = 0x00
+	// userPassFailure is the RFC 1929 rejection status. The first byte of that
+	// reply is userPassVersion, *not* socks5Version — transposing the two is the
+	// classic hand-rolled SOCKS5 bug and surfaces to the client as a protocol
+	// fault rather than a refused password.
+	userPassFailure = 0x01
 
 	cmdConnect = 0x01
 
@@ -61,11 +67,13 @@ type target struct {
 
 func (t target) String() string { return net.JoinHostPort(t.host, strconv.Itoa(t.port)) }
 
-// socksRequest is a parsed client CONNECT, plus whatever credentials arrived
-// during negotiation.
+// socksRequest is a parsed client CONNECT, plus the session the credentials
+// named.
 type socksRequest struct {
-	target     target
-	sessionKey string // empty when the client authenticated with "none"
+	target target
+	// sessionKey is the username. Empty means the caller named no session and
+	// falls back to DEFAULT_SESSION.
+	sessionKey string
 }
 
 // readSocksRequest performs the server side of a SOCKS5 negotiation up to and
@@ -74,10 +82,10 @@ type socksRequest struct {
 // The reply to the client is deliberately deferred: it has to report whether
 // the *upstream* connection succeeded, which is not known until an instance has
 // been picked and dialled.
-func readSocksRequest(conn net.Conn) (socksRequest, error) {
+func readSocksRequest(conn net.Conn, verify credentialCheck) (socksRequest, error) {
 	var req socksRequest
 
-	key, err := negotiateAuth(conn)
+	key, err := negotiateAuth(conn, verify)
 	if err != nil {
 		return req, err
 	}
@@ -91,14 +99,18 @@ func readSocksRequest(conn net.Conn) (socksRequest, error) {
 	return req, nil
 }
 
-// negotiateAuth runs method selection and, if the client offers it,
-// username/password authentication.
+// negotiateAuth runs method selection and RFC 1929 username/password
+// authentication.
 //
-// User/pass is preferred whenever offered, because the username *is* the
-// session key — it is how a caller says "keep me on the same instance". The
-// password is ignored: this is an identity hint from a caller that already had
-// to reach the port, not an access control mechanism.
-func negotiateAuth(conn net.Conn) (string, error) {
+// The username is the session key — how a caller says "keep me on the same
+// instance" — and the password is the credential.
+//
+// A client that does not offer username/password is refused with 0xFF. Keeping
+// "no authentication" as a fallback would be a complete bypass of the credential,
+// and RFC 1928 already requires the client to close on 0xFF. Real clients are
+// unaffected: curl, httpx and requests all offer both methods when the proxy URL
+// carries credentials.
+func negotiateAuth(conn net.Conn, verify credentialCheck) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return "", fmt.Errorf("read greeting: %w", err)
@@ -116,36 +128,19 @@ func negotiateAuth(conn net.Conn) (string, error) {
 		return "", fmt.Errorf("read auth methods: %w", err)
 	}
 
-	var offersUserPass, offersNone bool
-	for _, m := range methods {
-		switch m {
-		case authUserPass:
-			offersUserPass = true
-		case authNone:
-			offersNone = true
-		}
-	}
-
-	switch {
-	case offersUserPass:
-		if _, err := conn.Write([]byte{socks5Version, authUserPass}); err != nil {
-			return "", fmt.Errorf("write method selection: %w", err)
-		}
-		return readUserPass(conn)
-	case offersNone:
-		if _, err := conn.Write([]byte{socks5Version, authNone}); err != nil {
-			return "", fmt.Errorf("write method selection: %w", err)
-		}
-		return "", nil
-	default:
+	if !slices.Contains(methods, authUserPass) {
 		_, _ = conn.Write([]byte{socks5Version, authNoAcceptable})
-		return "", errors.New("no acceptable auth method offered")
+		return "", errors.New("client did not offer username/password authentication")
 	}
+	if _, err := conn.Write([]byte{socks5Version, authUserPass}); err != nil {
+		return "", fmt.Errorf("write method selection: %w", err)
+	}
+	return readUserPass(conn, verify)
 }
 
-// readUserPass reads an RFC 1929 username/password sub-negotiation and returns
-// the username as the session key.
-func readUserPass(conn net.Conn) (string, error) {
+// readUserPass reads an RFC 1929 sub-negotiation, verifies the password, and
+// returns the username as the session key.
+func readUserPass(conn net.Conn, verify credentialCheck) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return "", fmt.Errorf("read auth header: %w", err)
@@ -163,14 +158,23 @@ func readUserPass(conn net.Conn) (string, error) {
 	if _, err := io.ReadFull(conn, plen); err != nil {
 		return "", fmt.Errorf("read password length: %w", err)
 	}
-	if n := int(plen[0]); n > 0 {
-		// The password is read to keep the stream in sync, then discarded.
-		if _, err := io.CopyN(io.Discard, conn, int64(n)); err != nil {
-			return "", fmt.Errorf("read password: %w", err)
-		}
+	// A zero-length password needs no special case: it cannot match a token, so
+	// it fails verification like any other wrong credential.
+	password := make([]byte, int(plen[0]))
+	if _, err := io.ReadFull(conn, password); err != nil {
+		return "", fmt.Errorf("read password: %w", err)
 	}
 
-	// Authentication always succeeds; the username is an identity hint.
+	if err := verify(string(password)); err != nil {
+		// RFC 1929 requires the connection to close after a failure status, so
+		// the CONNECT request is deliberately left unread. The 10-byte
+		// writeSocksReply is not sent either: it answers a request that does not
+		// exist yet, and sending one here desynchronises the client into an error
+		// that looks like a protocol fault instead of a refused password.
+		_, _ = conn.Write([]byte{userPassVersion, userPassFailure})
+		return "", fmt.Errorf("proxy credential refused: %w", err)
+	}
+
 	if _, err := conn.Write([]byte{userPassVersion, userPassSuccess}); err != nil {
 		return "", fmt.Errorf("write auth reply: %w", err)
 	}

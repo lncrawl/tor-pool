@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,22 @@ type Router interface {
 	SampleExit(instance int)
 }
 
+// credentialCheck verifies a proxy password.
+//
+// A function type rather than an interface because that is the whole dependency,
+// and declaring it here rather than importing internal/auth keeps the handshake
+// tests free of a credential store — the same reason Router is declared here.
+type credentialCheck func(secret string) error
+
+// handshakeTimeout bounds how long a client may take to complete a SOCKS5
+// handshake.
+//
+// Without one, a client that connects and sends a single byte holds a goroutine
+// and a file descriptor indefinitely. That was always true; mandatory
+// authentication makes stalling mid-handshake the cheapest way to attack the
+// port, so it is no longer only a tidiness question.
+const handshakeTimeout = 30 * time.Second
+
 // exitSampleDelay is how long after a connection is established the instance's
 // exit relay is sampled.
 //
@@ -49,6 +66,7 @@ const exitSampleDelay = 250 * time.Millisecond
 type Server struct {
 	cfg    *config.Config
 	router Router
+	verify credentialCheck
 	log    *slog.Logger
 
 	mu        sync.Mutex
@@ -56,8 +74,8 @@ type Server struct {
 }
 
 // NewServer builds the proxy listeners. Nothing binds until Start.
-func NewServer(cfg *config.Config, router Router, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, router: router, log: log}
+func NewServer(cfg *config.Config, router Router, verify credentialCheck, log *slog.Logger) *Server {
+	return &Server{cfg: cfg, router: router, verify: verify, log: log}
 }
 
 // Start binds the configured listeners and serves until ctx is cancelled.
@@ -131,11 +149,21 @@ func (s *Server) Close() error {
 func (s *Server) handleSocks(ctx context.Context, client net.Conn) {
 	defer func() { _ = client.Close() }()
 
-	req, err := readSocksRequest(client)
+	if err := client.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return
+	}
+	req, err := readSocksRequest(client, s.verify)
 	if err != nil {
-		// A malformed handshake is the client's fault; no instance is involved
-		// yet, so nothing is scored.
-		s.log.Debug("socks handshake failed", "remote", remoteHost(client), "error", err)
+		// A malformed handshake or a refused credential is the client's fault; no
+		// instance is involved yet, so nothing is scored.
+		//
+		// Logged to stderr and deliberately not to the event log: that ring is
+		// bounded, so one entry per refused connection would let anyone flush the
+		// audit history in seconds, exactly when it matters.
+		s.log.Warn("socks handshake failed", "remote", remoteHost(client), "error", err)
+		return
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
 
@@ -225,17 +253,44 @@ func remoteHost(conn net.Conn) string {
 }
 
 // reportDialFailure scores a failed upstream dial against its instance.
+//
+// Except when the destination was never reachable through tor to begin with. A
+// loopback or private literal is refused by tor itself, so blaming the instance
+// for it lets any caller quarantine the entire pool by asking for 127.0.0.1 a few
+// times — measured at three requests with the default thresholds. The request is
+// still recorded as failed, so the accounting stays honest; only the remediation
+// ladder is spared.
 func (s *Server) reportDialFailure(instance int, key string, t target, err error) {
-	var upstreamErr *UpstreamError
-	reason := "dial_error"
-	if errors.As(err, &upstreamErr) {
-		reason = "socks_" + strings.ReplaceAll(socksReplyText(upstreamErr.Code), " ", "_")
-	}
-
 	s.log.Info("upstream dial failed",
 		"session", key, "instance", instance, "target", t.String(), "error", err)
-	s.router.RecordTransportFailure(instance, reason)
+
+	if unroutableTarget(t) {
+		s.log.Warn("destination is unroutable through tor, not scored against the instance",
+			"session", key, "instance", instance, "target", t.String())
+	} else {
+		var upstreamErr *UpstreamError
+		reason := "dial_error"
+		if errors.As(err, &upstreamErr) {
+			reason = "socks_" + strings.ReplaceAll(socksReplyText(upstreamErr.Code), " ", "_")
+		}
+		s.router.RecordTransportFailure(instance, reason)
+	}
 	s.router.Finish(key, Outcome{Instance: instance, Failed: true})
+}
+
+// unroutableTarget reports whether tor could never have reached a destination
+// whatever the instance's state.
+//
+// Only address literals. Whether a *hostname* resolves to something private is
+// tor's business and unknowable here, and a name that fails to resolve genuinely
+// can mean a broken circuit — so those stay the instance's problem.
+func unroutableTarget(t target) bool {
+	ip, err := netip.ParseAddr(t.host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
 
 // dialFailureReply maps an upstream failure onto the SOCKS reply code the client
