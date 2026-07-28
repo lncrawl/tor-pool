@@ -42,6 +42,11 @@ func TestLoadParsesOverrides(t *testing.T) {
 		"QUARANTINE_FAILURES":     "9",
 		"TOR_EXIT_NODES":          " {us} ",
 		"MAX_REMEDIATION_BACKOFF": "1h",
+		"ADMIN_USER":              "operator",
+		"ADMIN_PASSWORD":          " keep spaces? no ",
+		"PROXY_TOKEN":             "tp_abc",
+		"LOGIN_TTL":               "8h",
+		"LOGIN_RATE_LIMIT":        "3",
 	}))
 	if err != nil {
 		t.Fatalf("loadFrom: %v", err)
@@ -66,6 +71,41 @@ func TestLoadParsesOverrides(t *testing.T) {
 	}
 	if c.ExitNodes != "{us}" {
 		t.Errorf("ExitNodes = %q, want %q (trimmed)", c.ExitNodes, "{us}")
+	}
+	if c.AdminUser != "operator" {
+		t.Errorf("AdminUser = %q, want operator", c.AdminUser)
+	}
+	// Trimmed like every other string. Surrounding whitespace in a password is
+	// far more likely to be a copy-paste artefact than deliberate, and a
+	// credential that depends on invisible characters is unshippable.
+	if c.AdminPassword != "keep spaces? no" {
+		t.Errorf("AdminPassword = %q, want it trimmed", c.AdminPassword)
+	}
+	if c.ProxyToken != "tp_abc" {
+		t.Errorf("ProxyToken = %q, want tp_abc", c.ProxyToken)
+	}
+	if c.LoginTTL != 8*time.Hour {
+		t.Errorf("LoginTTL = %s, want 8h", c.LoginTTL)
+	}
+	if c.LoginRateLimit != 3 {
+		t.Errorf("LoginRateLimit = %d, want 3", c.LoginRateLimit)
+	}
+}
+
+// The error must never carry the value, or the password lands in stderr and in
+// `docker logs`. envString cannot error, which is what makes this hold.
+func TestPasswordNeverAppearsInAnError(t *testing.T) {
+	secret := "s3cr3t-do-not-log"
+	_, err := loadFrom(env(map[string]string{
+		"ADMIN_PASSWORD": secret,
+		// Something else must fail so there is an error to inspect at all.
+		"POOL_SIZE": "not-a-number",
+	}))
+	if err == nil {
+		t.Fatal("expected an error from POOL_SIZE")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the password appeared in an error: %v", err)
 	}
 }
 
@@ -208,6 +248,9 @@ func TestValidateBoundsChecks(t *testing.T) {
 		"empty data dir":       func(c *Config) { c.DataDir = "" },
 		"empty bind host":      func(c *Config) { c.BindHost = "" },
 		"session ttl zero":     func(c *Config) { c.SessionTTL = 0 },
+		"empty admin user":     func(c *Config) { c.AdminUser = "" },
+		"login ttl zero":       func(c *Config) { c.LoginTTL = 0 },
+		"negative rate limit":  func(c *Config) { c.LoginRateLimit = -1 },
 		"backoff inverted": func(c *Config) {
 			c.RemediationBackoff = time.Hour
 			c.MaxRemediationBackoff = time.Second

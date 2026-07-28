@@ -18,6 +18,12 @@ const (
 	EventResize      EventType = "resize"
 	EventInstance    EventType = "instance"
 	EventTorLog      EventType = "tor"
+
+	// EventAuth records operator actions only — a sign-in, a token issued or
+	// revoked. Rejected proxy credentials are logged to stderr instead: this ring
+	// is bounded, so one entry per refused connection would let anyone flush the
+	// audit history in seconds, exactly when it is worth reading.
+	EventAuth EventType = "auth"
 )
 
 // Event is one entry in the audit log — a record of something the pool decided

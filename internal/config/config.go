@@ -46,6 +46,18 @@ type Config struct {
 	APIPort   int
 	BindHost  string
 
+	// Authentication. Every field here is comparable on purpose: Defaults() is
+	// compared for equality in tests, so a slice or a map would not compile.
+	AdminUser string
+	// AdminPassword is generated on first boot when unset, and is the one
+	// credential never written to the store — see internal/auth.
+	AdminPassword string
+	// ProxyToken is an optional statically configured proxy credential, for
+	// deployments that provision by environment rather than by dashboard.
+	ProxyToken     string
+	LoginTTL       time.Duration
+	LoginRateLimit int
+
 	// Sessions
 	SessionTTL     time.Duration
 	DefaultSession SessionSource
@@ -104,6 +116,16 @@ func Defaults() Config {
 		// mapping. Restricting exposure is the host-side publish's job
 		// (compose publishes the API as 127.0.0.1:8080:8080).
 		BindHost: "0.0.0.0",
+
+		// No password here, and none can be: Defaults() is pure — it is compared
+		// for equality in tests and must not reach crypto/rand or the disk. An
+		// unset password is therefore never a validation error; internal/auth
+		// generates one on first boot and logs it once.
+		AdminUser: "admin",
+		LoginTTL:  24 * time.Hour,
+		// Ten wrong passwords a minute from one address. Generous for a typo,
+		// useless for a dictionary.
+		LoginRateLimit: 10,
 
 		SessionTTL:     10 * time.Minute,
 		DefaultSession: SessionFromIP,
@@ -219,6 +241,12 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envPort(look, "API_PORT", &c.APIPort))
 	collect(envString(look, "BIND_HOST", &c.BindHost))
 
+	collect(envString(look, "ADMIN_USER", &c.AdminUser))
+	collect(envString(look, "ADMIN_PASSWORD", &c.AdminPassword))
+	collect(envString(look, "PROXY_TOKEN", &c.ProxyToken))
+	collect(envDuration(look, "LOGIN_TTL", &c.LoginTTL))
+	collect(envInt(look, "LOGIN_RATE_LIMIT", &c.LoginRateLimit))
+
 	collect(envDuration(look, "SESSION_TTL", &c.SessionTTL))
 	collect(envSessionSource(look, "DEFAULT_SESSION", &c.DefaultSession))
 	collect(envInt(look, "MAX_SESSIONS", &c.MaxSessions))
@@ -293,6 +321,20 @@ func (c *Config) Validate() error {
 	}
 	if c.APIPort == 0 {
 		bad("API_PORT cannot be 0")
+	}
+
+	// Deliberately no "ADMIN_USER without ADMIN_PASSWORD" check. It would be
+	// right if an unset password meant open access, but it means a generated one,
+	// so a custom username with a generated password is a legitimate setup — the
+	// name is simply what the first-boot line reports.
+	if c.AdminUser == "" {
+		bad("ADMIN_USER cannot be empty")
+	}
+	if c.LoginTTL <= 0 {
+		bad("LOGIN_TTL must be positive")
+	}
+	if c.LoginRateLimit < 0 {
+		bad("LOGIN_RATE_LIMIT cannot be negative (0 disables the limit)")
 	}
 
 	if c.SessionTTL <= 0 {

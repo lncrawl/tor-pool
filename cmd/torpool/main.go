@@ -15,9 +15,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/lncrawl/tor-pool/internal/auth"
 	"github.com/lncrawl/tor-pool/internal/config"
 	"github.com/lncrawl/tor-pool/internal/pool"
 	"github.com/lncrawl/tor-pool/internal/proxy"
@@ -87,9 +89,28 @@ func run() error {
 	}()
 
 	p := pool.New(&cfg, fleet, log)
+
+	// Credentials are resolved before anything expensive starts: a data
+	// directory that cannot be written must fail now rather than after a
+	// two-minute tor bootstrap.
+	credentials, boot, err := auth.Open(&cfg, p.Events(), log)
+	if err != nil {
+		return fmt.Errorf("open credential store: %w", err)
+	}
+	reportBootstrap(&cfg, boot)
+
+	// Registered after the fleet's shutdown so that it runs before it: defers are
+	// LIFO, and a slow tor exit would otherwise eat the flush window.
+	defer func() {
+		if err := credentials.Flush(); err != nil {
+			log.Error("flush token usage", "error", err)
+		}
+	}()
+	go credentials.Run(ctx)
+
 	go p.Run(ctx)
 
-	proxies := proxy.NewServer(&cfg, p, log)
+	proxies := proxy.NewServer(&cfg, p, credentials.CheckProxy, log)
 	if err := proxies.Start(ctx); err != nil {
 		return fmt.Errorf("start proxy listeners: %w", err)
 	}
@@ -101,7 +122,7 @@ func run() error {
 
 	api := &http.Server{
 		Addr:              net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.APIPort)),
-		Handler:           server.New(p, &cfg, version, log).Handler(),
+		Handler:           server.New(p, credentials, &cfg, version, log).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No write timeout: /api/stream is a long-lived SSE connection and any
 		// deadline here would sever the dashboard on a fixed interval.
@@ -128,6 +149,45 @@ func run() error {
 	<-ctx.Done()
 	log.Info("shutdown signal received")
 	return nil
+}
+
+// reportBootstrap prints credentials generated during this boot, exactly once.
+//
+// Written straight to stderr rather than through slog, which is what main
+// already does for a configuration error: a structured handler would fold this
+// into one quoted attribute, and the whole value of the block is that an operator
+// reading `docker logs` cannot miss it. This is the only moment the plaintext
+// exists — the store keeps digests — so anything lost here is lost.
+func reportBootstrap(cfg *config.Config, boot auth.Bootstrap) {
+	if !boot.Any() {
+		return
+	}
+
+	rule := strings.Repeat("=", 74)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n%s\n", rule)
+	b.WriteString("  torpool generated credentials on this boot. Save them now: only\n")
+	b.WriteString("  their digests are stored, and they will not be shown again.\n")
+
+	if boot.AdminPassword != "" {
+		fmt.Fprintf(&b, "\n  dashboard    %s / %s\n", boot.AdminUser, boot.AdminPassword)
+		b.WriteString("               set ADMIN_PASSWORD to choose your own instead\n")
+	}
+	if boot.ProxyToken != "" {
+		fmt.Fprintf(&b, "\n  proxy token  %s\n", boot.ProxyToken)
+		if cfg.SocksPort != 0 {
+			fmt.Fprintf(&b, "               socks5h://<session>:%s@host:%d\n",
+				boot.ProxyToken, cfg.SocksPort)
+		}
+		b.WriteString("               set PROXY_TOKEN to choose your own instead\n")
+	}
+
+	fmt.Fprintf(&b, "\n  Stored in %s\n", cfg.DataDir)
+	b.WriteString("  Mount that path as a volume, or they are regenerated whenever the\n")
+	b.WriteString("  container is recreated.\n")
+	fmt.Fprintf(&b, "%s\n\n", rule)
+
+	_, _ = os.Stderr.WriteString(b.String())
 }
 
 func newLogger(level string) *slog.Logger {
