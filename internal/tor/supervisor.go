@@ -126,7 +126,19 @@ func (i *Instance) startLocked(ctx context.Context) error {
 	}
 	i.log.Info("tor started", "pid", proc.Pid())
 
-	ctrl, err := Connect(ctx, i.cfg)
+	// A tor that dies during startup must not leave the rest of this function
+	// waiting on it. Connect retries until its context is done, and the auth
+	// cookie outlives the process that wrote it — so against a dead tor it would
+	// retry forever while holding startMu, which is the lock the restart that
+	// would fix it needs.
+	startCtx, abandon := context.WithCancel(ctx)
+	defer abandon()
+	go func() {
+		_ = proc.Wait()
+		abandon()
+	}()
+
+	ctrl, err := Connect(startCtx, i.cfg)
 	if err != nil {
 		return fmt.Errorf("instance %d: %w", i.cfg.Index, err)
 	}
@@ -135,7 +147,7 @@ func (i *Instance) startLocked(ctx context.Context) error {
 	i.mu.Unlock()
 	i.log.Debug("control port authenticated")
 
-	err = WaitBootstrapped(ctx, ctrl, bootstrapPoll, func(pct int) {
+	err = WaitBootstrapped(startCtx, ctrl, bootstrapPoll, func(pct int) {
 		i.mu.Lock()
 		changed := pct > i.bootstrap
 		i.bootstrap = pct

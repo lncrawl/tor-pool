@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -88,10 +89,10 @@ func TestRotationsDoNotStack(t *testing.T) {
 func TestRotatingAnAbsentInstanceIsRejected(t *testing.T) {
 	p := newTestPool(t)
 
-	if err := p.StartRotateInstance(9); err != ErrNoSuchInstance {
+	if err := p.StartRotateInstance(9); !errors.Is(err, ErrNoSuchInstance) {
 		t.Errorf("err = %v, want ErrNoSuchInstance", err)
 	}
-	if err := p.RotateInstance(9); err != ErrNoSuchInstance {
+	if err := p.RotateInstance(9); !errors.Is(err, ErrNoSuchInstance) {
 		t.Errorf("err = %v, want ErrNoSuchInstance", err)
 	}
 }

@@ -25,6 +25,10 @@ services:
       # Move an instance's sessions elsewhere when it is rotated.
       DRAIN_ON_ROTATE: '${DRAIN_ON_ROTATE:-true}'
 
+      # Lock each instance to one exit relay, so its exit IP holds still until it
+      # is rotated. Off by default: the instance then depends on that one relay.
+      PIN_EXIT_RELAY: '${PIN_EXIT_RELAY:-false}'
+
       LOG_LEVEL: '${LOG_LEVEL:-info}'
 
     ports:

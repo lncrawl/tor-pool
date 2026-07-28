@@ -55,12 +55,26 @@ Two traps:
 | --- | --- | --- |
 | `status/bootstrap-phase` | `NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="Done"` | Parse `PROGRESS=`. **Not monotonic** — it can fall back after a connection loss, so never treat a decrease as an error |
 | `circuit-status` | one line per circuit | Multi-line `+` payload. Each line ends with optional key=value fields, of which `TIME_CREATED=` is the one that dates a circuit — **do not infer age from list order** |
-| `stream-status` | one line per stream: `<id> SUCCEEDED <circuitID> host:port` | `NEW`/`NEWRESOLVE` streams carry circuit id `0` |
+| `stream-status` | one line per stream: `<id> <state> <circuitID> host:port` | `NEW`/`NEWRESOLVE` streams carry circuit id `0`. Every other state — `SENTCONNECT`, `CONNECT_WAIT`, `RESOLVE_WAIT`, `REMAP`, `SUCCEEDED` — names a real circuit. See the two questions below |
 | `ns/id/<fingerprint>` | consensus entry for a relay | The `r` line's 7th field is the IP |
 | `ip-to-country/<ip>` | two-letter country code | Needs the GeoIP databases; Alpine's `tor` package ships them at `/usr/share/tor`, so no extra package is required |
 
 A `GETINFO` reply is either `key=value` on one line, or `key=` followed by a payload whose last
 line is `OK` — which must be stripped before use.
+
+### stream-status answers two different questions
+
+Conflating them cost 4-5% of requests during rotation.
+
+- **"Where is this instance going out?"** — only `SUCCEEDED`. A stream that has not connected
+  yet proves nothing about a working path (`attachedCircuitIDs`).
+- **"Which circuits must not be closed?"** — every stream with a non-zero circuit id
+  (`busyCircuitIDs`). A stream in `SENTCONNECT` is a request in flight: tor has picked its
+  circuit and is waiting for the exit to open the TCP connection, which lasts as long as the
+  destination takes to answer. Closing that circuit fails the request outright.
+
+If `stream-status` cannot be read at all, close **nothing**. There is then no way to tell a live
+request's circuit from an abandoned one, and tor retires them on its own schedule anyway.
 
 ## Resolving the exit relay
 
@@ -82,11 +96,12 @@ while nothing about the instance has changed. That was a real bug; keep the choi
 
 Details that matter:
 
-- **`PURPOSE=CONFLUX_LINKED` circuits carry exit traffic and must be accepted.** Conflux is on
-  by default in current tor: streams ride linked conflux legs, while the `GENERAL` circuits
-  sitting alongside them are usually preemptive. Legs of one set share their exit relay, so they
-  all resolve to the same answer. Accepting only `GENERAL` is how the resolver ends up naming an
-  exit no traffic uses.
+- **`PURPOSE=CONFLUX_LINKED` circuits carry exit traffic and must be accepted.** Streams ride
+  linked conflux legs, while the `GENERAL` circuits sitting alongside them are usually
+  preemptive. Legs of one set share their exit relay, so they all resolve to the same answer.
+  Accepting only `GENERAL` is how the resolver ends up naming an exit no traffic uses.
+  (tor-pool renders `ConfluxEnabled 0` by default — see the exit-stability note below — but the
+  parser must still handle these, because the option can be turned back on.)
 - **`IS_INTERNAL` in `BUILD_FLAGS` means no exit hop**, whatever the purpose says — that is how
   `HS_VANGUARDS` circuits show up.
 - **Circuits built before the last NEWNYM are excluded.** That signal marks every existing
@@ -108,13 +123,34 @@ Details that matter:
 - This resolution reads tor's own consensus view, so it costs **no Tor bandwidth**, unlike
   fetching an IP-echo URL through the circuit.
 
-**What this value actually means.** It is *an* exit currently in use, not a guarantee about the
-next request: tor retires circuits on its own schedule (`MaxCircuitDirtiness`, set in
-`internal/config`). Report it as "current exit".
+**What this value actually means.** Steps 2 and 3 are *guesses* — inferred from the circuits tor
+is holding, several of which it built preemptively and no request will ever use. Only step 1 is
+evidence. `ExitNode` returns that distinction as a `confirmed` bool, and an unconfirmed answer
+must never displace a confirmed one; publishing guesses as fact is what made a rotation look like
+the exit IP jumped once or twice before settling.
+
+It is also not a guarantee about the *next* request unless the exit is pinned: tor retires
+circuits on its own schedule (`MaxCircuitDirtiness`, set in `internal/config`).
 
 Expect failure before a circuit exists: right after bootstrap, and right after a NEWNYM, there
 may be no eligible circuit at all. That is a normal transient, not an error worth surfacing to
 the user — but it must read as "unknown", never as the previous exit.
+
+## One instance, one exit IP
+
+Neither `MaxCircuitDirtiness` nor sticky reporting makes an instance's exit IP *stable*. Tor holds
+several exit-bearing circuits at once and picks between them per stream, so a caller pinned to one
+instance was measured being served by two different relays inside a minute with no rotation at
+all. Two levers, both in `internal/config`:
+
+- `ConfluxEnabled 0` (default here, unlike in tor): every conflux set tor pre-builds is another
+  distinct exit in the pool it picks from. Disabling it removes most of the churn.
+- `PIN_EXIT_RELAY` (opt-in): `SETCONF ExitNodes=$<fp> StrictNodes=1` after the instance has an
+  exit. **A pin only governs circuits built afterwards** — the standing ones keep their own exits
+  and tor will attach the next stream to one of them, so `CloseCircuitsExceptExit` has to clear
+  them or the pin is one the traffic ignores. Releasing it for a rotation adds the old relay to
+  `ExcludeExitNodes` while tor picks, so the rotation cannot hand back the exit just declared
+  burnt, and restores the configured exclusions when it locks the replacement.
 
 ## NEWNYM and its cooldown
 
@@ -159,25 +195,44 @@ but they stay up, and while they do:
 So `Control.CloseRetiredCircuits` closes every exit-bearing circuit dated before the last NEWNYM.
 Tor then rebuilds at once and the new exit resolves within a second or two.
 
-**Circuits carrying a stream must be spared** (`stream-status` lists them). A proxy connection is
-pinned to its instance for its whole life, so closing one fails a request already in flight —
-including an idle HTTP `CONNECT` tunnel, whose stream stays open between requests.
+**Circuits carrying a stream must be spared** — any stream, not just a connected one; see
+"stream-status answers two different questions" above. A proxy connection is pinned to its
+instance for its whole life, so closing one fails a request already in flight — including an idle
+HTTP `CONNECT` tunnel, whose stream stays open between requests.
 
 ## SETCONF
 
 ```
 SETCONF ExitNodes="{us},{ca}"
 SETCONF ExitNodes          (no value resets the option to its default)
+SETCONF ExitNodes=$AAAA ExcludeExitNodes StrictNodes=1   (several in one command)
 ```
+
+**Apply options that only make sense together in one command** (`SetConfAll`). A `StrictNodes` that
+lands before its `ExitNodes` leaves tor briefly unable to build anything at all; one that lands
+after leaves a window where the pin is merely advisory.
 
 Values containing whitespace, quotes or backslashes must be sent as a QuotedString.
 `quoteControlValue` handles this and **strips newlines**, which would otherwise terminate the
 command line and let a caller-supplied value inject a second command. Exit policies and anything
 else derived from user input must go through it.
 
-## Concurrency
+## Concurrency and failure
 
 The protocol is a synchronous request/reply stream over one connection, so `Control` is **not**
-safe for concurrent use. Callers serialise commands — `Instance` holds the connection and its own
-mutex. Never hold that mutex across a control command that can block (`Newnym` waits out a
-cooldown); copy the pointer out under the lock and release it first.
+safe for concurrent use. `Instance` serialises commands behind `ctrlMu` and reaches the connection
+only through `withControl`. Rules that have each cost a real bug:
+
+- **Never block with the control lock held.** `Instance.Newnym` waits out the cooldown with it
+  released and re-checks after; holding it across a ten second sleep blocked the exit poller,
+  which blocked the pool's whole maintenance loop.
+- **Pollers use `tryWithControl`**, which gives up if the lock is taken rather than queueing
+  behind a command that may take as long as the cooldown.
+- **Every command has an I/O deadline.** A tor that accepts the connection and then stops
+  answering otherwise wedges the caller forever, holding the lock.
+- **An I/O failure mid-command poisons the connection.** The reply it did not finish reading would
+  be read as the next command's, so `Control` marks itself `Broken` and the instance redials.
+  A non-2xx reply is *not* a break — tor said no, in a complete well-framed answer.
+- **Redial when the connection is gone.** Nothing else does, and a control connection lost while
+  tor keeps running leaves an instance that still serves traffic but can never be rotated or
+  report its exit again.

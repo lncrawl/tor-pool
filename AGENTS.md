@@ -102,14 +102,41 @@ isn't.
    itself** — the old circuits stay standing and usable enough that traffic has been seen still
    leaving through them, so a rotation closes them (`CloseRetiredCircuits`). Drop that and
    rotation silently stops taking effect on the next request.
-6. **Session keys are untrusted input.** They arrive as a SOCKS5 username or a
-   `Proxy-Authorization` header from whoever can reach the proxy port. Bound the session table
-   (`MAX_SESSIONS`), and never interpolate a key into a log message, a torrc, or a shell command
-   without escaping it.
-7. **The instance port blocks must not collide with the listeners.** `internal/config`
-   validates this at boot; if you add a listener, add it to that check too.
-8. **Pool size is dynamic.** Instances are created and retired at runtime, so never cache a
-   slice of instances or index into one across an await point. Ask the pool.
+6. **A circuit with *any* stream on it is carrying a request.** Not just `SUCCEEDED`: a stream in
+   `SENTCONNECT` or `RESOLVE_WAIT` has been given a circuit and is waiting on the exit, for as
+   long as the destination takes to answer. Closing it fails the request — measured at 4-5% of
+   traffic during rotation. "Where is the instance going out" and "which circuits are busy" are
+   different questions over the same payload; see the `tor-control` skill.
+7. **A rotation must not be blamed for the failures it causes.** Rotating destroys the circuits
+   in-flight requests were using, so those requests fail. Scoring them against the instance
+   quarantined healthy ones, whose remediation rotated them again. `Pool.RecordFailure` drops
+   failures inside an instance's rotation window plus a grace period.
+8. **Rotate one instance at a time.** A pool-wide rotation that signals everything at once leaves
+   nothing with circuits for a second or two, which is the one state a pool exists to prevent.
+9. **One instance is not one exit IP by default.** Tor holds several exit-bearing circuits and
+   picks between them per stream, so a pinned caller's IP changes with no rotation at all —
+   `ConfluxEnabled 0` removes most of that, and `PIN_EXIT_RELAY` removes the rest at the cost of
+   depending on one relay. Anything reported without a stream attached is a *guess*: keep the
+   `confirmed` distinction, and never let a guess overwrite a confirmed exit.
+10. **Tor can stall part-way through bootstrap with a healthy process.** Nothing else catches it —
+    the supervisor sees a live process and an instance taking no traffic records no failures — so
+    the pool silently runs under strength. `BOOTSTRAP_STALL_TIMEOUT` restarts on *lack of
+    progress*, never on elapsed time, because a slow consensus fetch is not a stall.
+11. **Session keys are untrusted input.** They arrive as a SOCKS5 username or a
+    `Proxy-Authorization` header from whoever can reach the proxy port. Bound the session table
+    (`MAX_SESSIONS`), and never interpolate a key into a log message, a torrc, or a shell command
+    without escaping it.
+12. **The instance port blocks must not collide with the listeners.** `internal/config`
+    validates this at boot; if you add a listener, add it to that check too. An instance index
+    maps to a fixed pair of ports in two blocks a fixed distance apart, so indexes are *reused*
+    rather than counted upwards — a counter eventually hands out a SOCKS port that is another
+    instance's control port.
+13. **Pool size is dynamic.** Instances are created and retired at runtime, so never cache a
+    slice of instances or index into one across an await point. Ask the pool.
+14. **Nothing on a request path may block on a control port.** A command can take as long as the
+    NEWNYM cooldown, so the pool's maintenance loop keeps the exit poll on its own goroutine,
+    pollers give up rather than queue, and an instance rotation returns once the instance is out
+    of service and finishes the slow half in the background.
 
 ## Skills
 

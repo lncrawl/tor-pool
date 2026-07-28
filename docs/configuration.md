@@ -19,7 +19,14 @@ network-bound and mostly parallel, so a pool of ten is usable in about the time 
 takes.
 
 `SPAWN_STAGGER` spaces out the launches so N simultaneous consensus fetches do not
-compete at boot.
+compete at boot, or on a runtime resize.
+
+`BOOTSTRAP_STALL_TIMEOUT` restarts an instance that has stopped making progress towards
+being usable. Tor can wedge part-way through bootstrap with a perfectly healthy process,
+and nothing else catches it: the supervisor sees a running Tor, and an instance that takes
+no traffic never records a failure for the ladder to act on — so the pool quietly runs
+under strength. The first restart keeps the state directory; a second wipes it, because a
+poisoned cached consensus is the usual cause. Set it to `0` to disable the check.
 
 ## Sessions
 
@@ -78,6 +85,23 @@ exit IP stays put. It defaults to far longer than Tor's own ten minutes, because
 default would change the exit under a caller that never asked to rotate. The cost is
 linkability: more requests share one observable identity. That is the point here and the
 opposite of what a privacy-focused client wants.
+
+`TOR_CONFLUX` turns Tor's multipath circuits back on. It is off by default, unlike in Tor
+itself, because circuit lifetime is only half of what makes an exit IP stable: Tor holds
+several exit-bearing circuits at once and picks between them per stream, and each conflux
+set it pre-builds is another distinct exit relay in that pool. With it on, one instance was
+observed handing a caller two exit IPs inside a minute with no rotation at all.
+
+`PIN_EXIT_RELAY` goes the whole way: once an instance has an exit, the pool locks Tor to
+that relay and closes the standing circuits that leave through a different one, so *one
+instance is one exit IP* until it is rotated. A rotation releases the pin, excludes the
+relay it just left, and locks the replacement Tor chooses.
+
+It is off by default because it is a real trade. A pinned instance depends on one relay:
+if that relay is slow, or rejects the destination port, every request on the instance
+suffers until the failure ladder rotates it. Turn it on when a stable exit identity per
+instance matters more than that — a session the target site has tied to one IP — and leave
+it off when you would rather have Tor spread the load itself.
 
 `TOR_EXTRA_CONFIG` is appended verbatim to every instance's torrc, for anything not
 modelled above.

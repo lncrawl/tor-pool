@@ -35,8 +35,15 @@ shrinking retires the highest-numbered ones and moves their sessions off first.
 
 ### `POST /api/pool/rotate`
 
-New circuit on every instance. Each waits out its own cooldown, so this takes a few
-seconds to fully land.
+New circuit on every instance, **one at a time**, so the rest of the pool keeps serving
+throughout. Returns immediately:
+
+```json
+{ "rotating": 5, "in_progress": false }
+```
+
+The sweep outlives the request by roughly Tor's NEWNYM cooldown per instance. Asking again
+while one is running starts nothing and answers `{"rotating": 0, "in_progress": true}`.
 
 ## Instances
 
@@ -47,7 +54,7 @@ seconds to fully land.
   "id": 0, "ready": true, "running": true, "bootstrap": 100, "pid": 15,
   "uptime_secs": 3612, "sessions": 3, "socks_addr": "127.0.0.1:19000",
   "exit_ip": "185.220.101.5", "exit_country": "DE", "exit_nickname": "SomeRelay",
-  "retired_exit_ip": "",
+  "retired_exit_ip": "", "exit_confirmed": true, "pinned_exit": "",
   "health": {
     "state": "healthy", "failures_in_window": 0, "consecutive_failures": 0,
     "transport_failures": 2, "client_failures": 1,
@@ -58,13 +65,21 @@ seconds to fully land.
 ```
 
 `exit_ip` is the exit **currently in use**, read from Tor's own consensus view and
-sampled while a connection is live. It is not a promise about the next request: Tor
-retires circuits on its own schedule. It is **empty** whenever the instance has no circuit
+sampled while a connection is live. It is **empty** whenever the instance has no circuit
 whose exit it can name — before bootstrap finishes, and for the second or two after a
 rotation while Tor rebuilds.
 
-`retired_exit_ip` is set only in that window, and carries the exit the rotation discarded
-so a dashboard can show what it *was*. Never read it as the current exit.
+`exit_confirmed` says whether traffic has actually left through it. Tor holds several
+exit-bearing circuits at once and keeps building more preemptively, so with no stream
+attached the answer is inferred from whichever it is holding — a relay no request may ever
+use. An inferred exit never replaces a confirmed one; the first request through the
+instance confirms or corrects it. Treat `false` as "probably this".
+
+`pinned_exit` is the relay the instance is locked to when `PIN_EXIT_RELAY` is on, and empty
+otherwise. While it is set, `exit_ip` is a promise about the next request too.
+
+`retired_exit_ip` is set only while `exit_ip` is empty, and carries the exit the rotation
+discarded so a dashboard can show what it *was*. Never read it as the current exit.
 
 `state` is one of `starting`, `healthy`, `degraded`, `probation`, `quarantined`,
 `remediating`.
@@ -73,13 +88,14 @@ so a dashboard can show what it *was*. Never read it as the current exit.
 
 | Endpoint | Effect |
 | --- | --- |
-| `POST /api/instances/{id}/rotate` | New circuit (waits out Tor's cooldown). Its sessions are moved to other instances unless `DRAIN_ON_ROTATE` is off |
+| `POST /api/instances/{id}/rotate` | New circuit. Returns as soon as the instance is out of service and its sessions have moved (unless `DRAIN_ON_ROTATE` is off); Tor's cooldown then finishes in the background. `409` if the instance has not bootstrapped |
 | `POST /api/instances/{id}/restart` | Restart tor. `?wipe=false` keeps guards and cached consensus; the default wipes for a genuinely new identity |
 | `POST /api/instances/{id}/quarantine` | Take out of rotation and move its sessions |
 | `POST /api/instances/{id}/release` | Clear quarantine and accumulated failures |
 | `POST /api/instances/{id}/drain` | Move sessions off without quarantining |
 
-All return the instance's resulting state. `404` if the id does not exist.
+All return the instance's resulting state. `404` if the id does not exist, `409` if its
+state makes the action impossible.
 
 ## Sessions
 
@@ -102,14 +118,18 @@ that has already built its circuits rather than waiting out a NEWNYM cooldown.
 
 ```bash
 curl -XPOST localhost:8080/api/sessions/alice/rotate
-# {"session":"alice","instance":4,"exit_ip":"94.142.244.16"}
+# {"session":"alice","instance":4,"exit_ip":"94.142.244.16","exit_confirmed":true}
 ```
 
 Add `?newnym=true` to also ask the *vacated* instance for a fresh circuit — worth it
 when you believe that exit itself is burnt, not just that you want to move.
 
-> The `exit_ip` in this response is a best guess. No stream is attached to the session
-> yet, so Tor has not committed to a circuit for it.
+If there is nowhere else to move to — a single-instance pool, or one instance routable —
+the session stays put and its instance is rotated instead, because a rotation that leaves
+the exit IP alone did nothing.
+
+> `exit_ip` here is whatever that instance last confirmed, and `exit_confirmed` says
+> whether traffic confirmed it. No stream of *this* session is attached yet either way.
 
 ### `POST /api/sessions/{key}/failure`
 
