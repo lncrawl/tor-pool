@@ -9,38 +9,95 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lncrawl/tor-pool/internal/auth"
 	"github.com/lncrawl/tor-pool/internal/config"
 	"github.com/lncrawl/tor-pool/internal/pool"
+	"github.com/lncrawl/tor-pool/internal/stats"
 	"github.com/lncrawl/tor-pool/internal/tor"
 )
+
+// testPassword is what newTestServer configures, so tests can log in.
+const testPassword = "test-password"
+
+// testServer is a server plus credentials its tests can present.
+//
+// The Auth is the real one rather than a fake: a store in a temp directory costs
+// nothing here, and it means these tests exercise the same verification the
+// binary does instead of a stub that agrees with them.
+type testServer struct {
+	*Server
+	// jwt is an operator session. token is proxy-scoped, so it is the credential
+	// that must be *refused* by admin routes.
+	jwt   string
+	token string
+}
 
 // newTestServer builds a server over an empty fleet.
 //
 // No tor process is started, so every instance-scoped route sees an empty pool
 // — which is exactly the edge the handlers most often get wrong.
-func newTestServer(t *testing.T) *Server {
+func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 
 	cfg := config.Defaults()
+	cfg.DataDir = t.TempDir()
+	cfg.AdminPassword = testPassword
 	log := slog.New(slog.DiscardHandler)
+
 	fleet := tor.NewFleet(tor.FleetOptions{
 		Size:           0,
 		Binary:         "tor",
-		DataDir:        t.TempDir(),
+		DataDir:        cfg.DataDir,
 		SocksPortFor:   cfg.InstanceSocksPort,
 		ControlPortFor: cfg.InstanceControlPort,
 	}, log)
 
-	return New(pool.New(&cfg, fleet, log), &cfg, "test", log)
+	credentials, _, err := auth.Open(&cfg, stats.NewEventLog(16), log)
+	if err != nil {
+		t.Fatalf("auth.Open: %v", err)
+	}
+	jwt, _, err := credentials.Login(cfg.AdminUser, testPassword, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	token, _, err := credentials.Mint("proxy-only", auth.ScopeProxy)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	return &testServer{
+		Server: New(pool.New(&cfg, fleet, log), credentials, &cfg, "test", log),
+		jwt:    jwt,
+		token:  token,
+	}
 }
 
-func do(t *testing.T, s *Server, method, path string, body string) *httptest.ResponseRecorder {
+// do issues a request as the operator, which is what most tests want.
+func do(t *testing.T, s *testServer, method, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doAs(t, s, s.jwt, method, path, body)
+}
+
+// doAs issues a request with an explicit bearer credential. An empty one sends no
+// Authorization header at all.
+func doAs(t *testing.T, s *testServer, bearer, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := newRequest(method, path, body)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	return serve(s, req)
+}
+
+func newRequest(method, path, body string) *http.Request {
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, path, reader)
+	return httptest.NewRequest(method, path, reader)
+}
+
+func serve(s *testServer, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	return rec

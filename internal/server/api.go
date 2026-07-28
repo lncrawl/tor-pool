@@ -1,8 +1,15 @@
 // Package server exposes the pool over HTTP: a REST API, an SSE stream for
 // live updates, Prometheus metrics, and the embedded dashboard.
 //
-// There is no authentication. The API can restart instances and resize the
-// pool, so the container must publish this port to loopback only.
+// Everything under /api/ requires a credential; /health, /metrics, the login
+// endpoint and the dashboard's static assets do not. Authentication is a Bearer
+// header and never a cookie, which is what makes the mutating endpoints immune
+// to cross-site requests — there is no CSRF defence here, and none is needed as
+// long as that holds.
+//
+// It is still not a substitute for TLS. Passwords, JWTs and tokens all cross the
+// wire in cleartext, so publishing this port beyond loopback needs something in
+// front of it.
 package server
 
 import (
@@ -13,6 +20,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lncrawl/tor-pool/internal/auth"
 	"github.com/lncrawl/tor-pool/internal/config"
 	"github.com/lncrawl/tor-pool/internal/pool"
 	"github.com/lncrawl/tor-pool/internal/stats"
@@ -28,57 +36,108 @@ var errNoSuchInstance = pool.ErrNoSuchInstance
 // Server serves the API and dashboard.
 type Server struct {
 	pool    *pool.Pool
+	auth    *auth.Auth
 	cfg     *config.Config
 	log     *slog.Logger
 	version string
 }
 
 // New builds the HTTP surface over a pool.
-func New(p *pool.Pool, cfg *config.Config, version string, log *slog.Logger) *Server {
-	return &Server{pool: p, cfg: cfg, log: log, version: version}
+func New(p *pool.Pool, credentials *auth.Auth, cfg *config.Config, version string, log *slog.Logger) *Server {
+	return &Server{pool: p, auth: credentials, cfg: cfg, log: log, version: version}
+}
+
+// route is one endpoint and the scope a caller needs for it.
+type route struct {
+	// method is empty for a pattern that answers every method.
+	method string
+	path   string
+	// need is the scope required. Empty means public, and only /health,
+	// /metrics and the login endpoint may be.
+	need auth.Scope
+	// ticket lets the credential arrive as a query parameter instead of a
+	// header, because EventSource cannot send one. Only the stream sets it.
+	ticket  bool
+	handler http.HandlerFunc
+}
+
+// routes is the API surface as data.
+//
+// A table rather than twenty HandleFunc calls, because that is what makes
+// authentication default-closed: a new endpoint cannot exist without naming a
+// scope, and TestEveryRouteIsGuarded walks this very slice to prove none was
+// forgotten. http.ServeMux does not expose the patterns it was given, so a test
+// has no other way to discover them.
+func (s *Server) routes() []route {
+	return []route{
+		// Public. /health is probed by the container healthcheck and by CI, and
+		// /metrics by scrapers that assume a trusted network. The login endpoint
+		// has to be reachable by definition; it is rate limited instead.
+		{method: "GET", path: "/health", handler: s.handleHealth},
+		{method: "GET", path: "/metrics", handler: s.handleMetrics},
+		{method: "POST", path: "/api/auth/login", handler: s.handleLogin},
+
+		{method: "POST", path: "/api/auth/ticket", need: auth.ScopeAdmin, handler: s.handleTicket},
+
+		{method: "GET", path: "/api/tokens", need: auth.ScopeAdmin, handler: s.handleTokens},
+		{method: "POST", path: "/api/tokens", need: auth.ScopeAdmin, handler: s.handleMintToken},
+		{method: "DELETE", path: "/api/tokens/{id}", need: auth.ScopeAdmin, handler: s.handleRevokeToken},
+
+		{method: "GET", path: "/api/pool", need: auth.ScopeAdmin, handler: s.handlePool},
+		{method: "POST", path: "/api/pool/rotate", need: auth.ScopeAdmin, handler: s.handlePoolRotate},
+		{method: "POST", path: "/api/pool/resize", need: auth.ScopeAdmin, handler: s.handlePoolResize},
+
+		{method: "GET", path: "/api/instances", need: auth.ScopeAdmin, handler: s.handleInstances},
+		{method: "GET", path: "/api/instances/{id}", need: auth.ScopeAdmin, handler: s.handleInstance},
+		{method: "POST", path: "/api/instances/{id}/rotate", need: auth.ScopeAdmin, handler: s.instanceAction(
+			// Started, not awaited: the instance stops taking traffic and its
+			// sessions move before this returns, and what is left is tor's NEWNYM
+			// cooldown — up to ten seconds of nothing worth holding a request open
+			// for. The dashboard sees the new exit arrive over the SSE stream.
+			func(_ *http.Request, id int) error { return s.pool.StartRotateInstance(id) })},
+		{method: "POST", path: "/api/instances/{id}/restart", need: auth.ScopeAdmin, handler: s.instanceAction(
+			func(r *http.Request, id int) error {
+				// Wiping is the default: a restart that keeps its guards and cached
+				// consensus is rarely what an operator means by "restart this".
+				return s.pool.RestartInstance(id, r.URL.Query().Get("wipe") != "false")
+			})},
+		{method: "POST", path: "/api/instances/{id}/quarantine", need: auth.ScopeAdmin, handler: s.instanceAction(
+			func(_ *http.Request, id int) error { return boolErr(s.pool.QuarantineInstance(id)) })},
+		{method: "POST", path: "/api/instances/{id}/release", need: auth.ScopeAdmin, handler: s.instanceAction(
+			func(_ *http.Request, id int) error { return boolErr(s.pool.ReleaseInstance(id)) })},
+		{method: "POST", path: "/api/instances/{id}/drain", need: auth.ScopeAdmin, handler: s.handleDrain},
+
+		// Rotating and reporting a failure are the data plane's own control
+		// surface: the scraper calls both with the token it already holds. Under
+		// the admin scope, that token could also resize the pool and restart
+		// instances. Dropping someone else's session stays an operator action.
+		{method: "GET", path: "/api/sessions", need: auth.ScopeAdmin, handler: s.handleSessions},
+		{method: "GET", path: "/api/sessions/{key}", need: auth.ScopeProxy, handler: s.handleSession},
+		{method: "POST", path: "/api/sessions/{key}/rotate", need: auth.ScopeProxy, handler: s.handleSessionRotate},
+		{method: "POST", path: "/api/sessions/{key}/failure", need: auth.ScopeProxy, handler: s.handleSessionFailure},
+		{method: "DELETE", path: "/api/sessions/{key}", need: auth.ScopeAdmin, handler: s.handleSessionDrop},
+
+		{method: "GET", path: "/api/events", need: auth.ScopeAdmin, handler: s.handleEvents},
+		{method: "GET", path: "/api/stats/history", need: auth.ScopeAdmin, handler: s.handleHistory},
+		{method: "GET", path: "/api/stream", need: auth.ScopeAdmin, ticket: true, handler: s.handleStream},
+
+		// Anything else under /api/ is authenticated before it is answered, so
+		// the surface does not leak which endpoints exist. ServeMux ranks this
+		// subtree pattern below every specific one above.
+		{path: "/api/", need: auth.ScopeAdmin, handler: http.NotFound},
+	}
 }
 
 // Handler returns the fully routed handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-
-	mux.HandleFunc("GET /api/pool", s.handlePool)
-	mux.HandleFunc("POST /api/pool/rotate", s.handlePoolRotate)
-	mux.HandleFunc("POST /api/pool/resize", s.handlePoolResize)
-
-	mux.HandleFunc("GET /api/instances", s.handleInstances)
-	mux.HandleFunc("GET /api/instances/{id}", s.handleInstance)
-	mux.HandleFunc("POST /api/instances/{id}/rotate", s.instanceAction(
-		// Started, not awaited: the instance stops taking traffic and its
-		// sessions move before this returns, and what is left is tor's NEWNYM
-		// cooldown — up to ten seconds of nothing worth holding a request open
-		// for. The dashboard sees the new exit arrive over the SSE stream.
-		func(_ *http.Request, id int) error { return s.pool.StartRotateInstance(id) }))
-	mux.HandleFunc("POST /api/instances/{id}/restart", s.instanceAction(
-		func(r *http.Request, id int) error {
-			// Wiping is the default: a restart that keeps its guards and cached
-			// consensus is rarely what an operator means by "restart this".
-			return s.pool.RestartInstance(id, r.URL.Query().Get("wipe") != "false")
-		}))
-	mux.HandleFunc("POST /api/instances/{id}/quarantine", s.instanceAction(
-		func(_ *http.Request, id int) error { return boolErr(s.pool.QuarantineInstance(id)) }))
-	mux.HandleFunc("POST /api/instances/{id}/release", s.instanceAction(
-		func(_ *http.Request, id int) error { return boolErr(s.pool.ReleaseInstance(id)) }))
-	mux.HandleFunc("POST /api/instances/{id}/drain", s.handleDrain)
-
-	mux.HandleFunc("GET /api/sessions", s.handleSessions)
-	mux.HandleFunc("GET /api/sessions/{key}", s.handleSession)
-	mux.HandleFunc("POST /api/sessions/{key}/rotate", s.handleSessionRotate)
-	mux.HandleFunc("POST /api/sessions/{key}/failure", s.handleSessionFailure)
-	mux.HandleFunc("DELETE /api/sessions/{key}", s.handleSessionDrop)
-
-	mux.HandleFunc("GET /api/events", s.handleEvents)
-	mux.HandleFunc("GET /api/stats/history", s.handleHistory)
-	mux.HandleFunc("GET /api/stream", s.handleStream)
-
+	for _, rt := range s.routes() {
+		pattern := rt.path
+		if rt.method != "" {
+			pattern = rt.method + " " + rt.path
+		}
+		mux.HandleFunc(pattern, s.guard(rt))
+	}
 	s.mountDashboard(mux)
 	return mux
 }

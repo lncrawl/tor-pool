@@ -31,12 +31,22 @@ func (s *Server) mountDashboard(mux *http.ServeMux) {
 	}
 	files := http.FileServerFS(root)
 
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		// An unmatched API route must 404, not fall through to the SPA. Handing
-		// a client HTML with a 200 for a mistyped endpoint is far harder to
-		// diagnose than a plain not-found.
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
+	// The assets are served without a credential on purpose: an unauthenticated
+	// browser has to be able to load the app in order to render its own login
+	// screen. Only the bundle is public — every /api/ call it makes is not.
+	//
+	// Unmatched /api/ paths never reach here: the route table registers the whole
+	// subtree, so a mistyped endpoint is authenticated and then 404s instead of
+	// being answered with HTML and a 200.
+	// Registered without a method so it can coexist with the route table's /api/
+	// subtree pattern: ServeMux rejects a method-specific general pattern
+	// alongside a method-less specific one. That also means every method on an
+	// unmatched /api/ path is authenticated before it answers, rather than a POST
+	// getting a 405 while a GET gets a 401.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
