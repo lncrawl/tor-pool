@@ -56,7 +56,7 @@ func TestSelectExitSkipsUnlinkedConfluxLegs(t *testing.T) {
 		"TIME_CREATED=2026-07-28T09:26:00.000000 CONFLUX_ID=9BD687E87B53"
 
 	var c Control
-	if got := c.selectExit(parseCircuits(status), ""); got == "7777" {
+	if got, _ := c.selectExit(parseCircuits(status), ""); got == "7777" {
 		t.Error("exit = 7777, want a circuit that can actually carry a stream")
 	}
 }
@@ -87,7 +87,7 @@ func TestSelectExitPrefersTheStreamsConfluxLeg(t *testing.T) {
 	var c Control
 	streams := "42 SUCCEEDED 2 example.com:443"
 
-	if got := c.selectExit(parseCircuits(confluxCircuits), streams); got != "CCCC" {
+	if got, _ := c.selectExit(parseCircuits(confluxCircuits), streams); got != "CCCC" {
 		t.Errorf("exit = %q, want the conflux exit CCCC", got)
 	}
 }
@@ -113,7 +113,7 @@ func TestSelectExitPrefersCircuitCarryingAStream(t *testing.T) {
 	var c Control
 	streams := "42 SUCCEEDED 1 example.com:443"
 
-	if got := c.selectExit(parseCircuits(testCircuits), streams); got != "CCCC" {
+	if got, _ := c.selectExit(parseCircuits(testCircuits), streams); got != "CCCC" {
 		t.Errorf("exit = %q, want CCCC (the circuit with the stream)", got)
 	}
 }
@@ -124,7 +124,7 @@ func TestSelectExitIgnoresUnattachedStreams(t *testing.T) {
 	var c Control
 	streams := "42 NEW 0 example.com:443\n43 NEWRESOLVE 0 example.com"
 
-	if got := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
+	if got, _ := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
 		t.Errorf("exit = %q, want FFFF from the newest circuit", got)
 	}
 }
@@ -133,7 +133,7 @@ func TestSelectExitUsesMostRecentStream(t *testing.T) {
 	var c Control
 	streams := "42 SUCCEEDED 1 old.example:443\n43 SUCCEEDED 2 new.example:443"
 
-	if got := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
+	if got, _ := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
 		t.Errorf("exit = %q, want FFFF from the latest stream", got)
 	}
 }
@@ -143,7 +143,7 @@ func TestSelectExitIgnoresStreamOnUnknownCircuit(t *testing.T) {
 	var c Control
 	streams := "42 SUCCEEDED 99 example.com:443"
 
-	if got := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
+	if got, _ := c.selectExit(parseCircuits(testCircuits), streams); got != "FFFF" {
 		t.Errorf("exit = %q, want the newest circuit's FFFF", got)
 	}
 }
@@ -154,7 +154,7 @@ func TestSelectExitPicksNewestByTimeCreated(t *testing.T) {
 		"2 BUILT $DDDD~guard,$FFFF~exit PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:00:00.000000"
 
 	var c Control
-	if got := c.selectExit(parseCircuits(status), ""); got != "CCCC" {
+	if got, _ := c.selectExit(parseCircuits(status), ""); got != "CCCC" {
 		t.Errorf("exit = %q, want CCCC (created most recently)", got)
 	}
 }
@@ -165,7 +165,7 @@ func TestSelectExitStaysOnTheExitItAlreadyReported(t *testing.T) {
 	c := Control{lastExit: "CCCC"}
 	status := testCircuits + "\n9 BUILT $IIII~guard,$JJJJ~exitthree PURPOSE=GENERAL"
 
-	if got := c.selectExit(parseCircuits(status), ""); got != "CCCC" {
+	if got, _ := c.selectExit(parseCircuits(status), ""); got != "CCCC" {
 		t.Errorf("exit = %q, want CCCC held steady", got)
 	}
 }
@@ -173,7 +173,7 @@ func TestSelectExitStaysOnTheExitItAlreadyReported(t *testing.T) {
 func TestSelectExitMovesOnWhenItsCircuitIsGone(t *testing.T) {
 	c := Control{lastExit: "ZZZZ"}
 
-	if got := c.selectExit(parseCircuits(testCircuits), ""); got != "FFFF" {
+	if got, _ := c.selectExit(parseCircuits(testCircuits), ""); got != "FFFF" {
 		t.Errorf("exit = %q, want FFFF now that ZZZZ's circuit has closed", got)
 	}
 }
@@ -187,7 +187,7 @@ func TestSelectExitExcludesCircuitsOlderThanTheLastNewnym(t *testing.T) {
 	status := "1 BUILT $AAAA~guard,$CCCC~old PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:10:00.000000\n" +
 		"2 BUILT $DDDD~guard,$FFFF~new PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:16:00.000000"
 
-	if got := c.selectExit(parseCircuits(status), "42 SUCCEEDED 1 example.com:443"); got != "FFFF" {
+	if got, _ := c.selectExit(parseCircuits(status), "42 SUCCEEDED 1 example.com:443"); got != "FFFF" {
 		t.Errorf("exit = %q, want FFFF built after the rotation", got)
 	}
 }
@@ -198,14 +198,14 @@ func TestSelectExitReportsNothingUntilAFreshCircuitExists(t *testing.T) {
 	c := Control{lastNewnym: time.Date(2026, 7, 28, 9, 15, 0, 0, time.UTC)}
 	status := "1 BUILT $AAAA~guard,$CCCC~old PURPOSE=GENERAL TIME_CREATED=2026-07-28T09:10:00.000000"
 
-	if got := c.selectExit(parseCircuits(status), ""); got != "" {
+	if got, _ := c.selectExit(parseCircuits(status), ""); got != "" {
 		t.Errorf("exit = %q, want empty until tor builds a replacement", got)
 	}
 }
 
 func TestSelectExitWithNoCircuits(t *testing.T) {
 	var c Control
-	if got := c.selectExit(nil, "42 SUCCEEDED 1 example.com:443"); got != "" {
+	if got, _ := c.selectExit(nil, "42 SUCCEEDED 1 example.com:443"); got != "" {
 		t.Errorf("exit = %q, want empty", got)
 	}
 }

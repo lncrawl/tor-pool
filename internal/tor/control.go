@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,16 +32,35 @@ func (e *ControlError) Error() string {
 	return fmt.Sprintf("tor: %s failed: %d %s", e.Cmd, e.Code, e.Reply)
 }
 
+// commandTimeout bounds the I/O of a single control command.
+//
+// Without it a tor that accepts the connection but stops answering wedges the
+// caller forever while it holds the instance's control lock — which took the
+// pool's maintenance loop with it. A local socket that cannot answer in this
+// long is not slow, it is broken.
+const commandTimeout = 20 * time.Second
+
 // Control is a client for a single tor control port.
 //
 // It is not safe for concurrent use: the control protocol is a synchronous
 // request/reply stream over one connection, so callers must serialise commands.
 // The pool holds one Control per instance and guards it with the instance lock.
+// The one exception is the NEWNYM cooldown, which is readable at any time so a
+// caller can decide whether to wait without taking that lock.
 type Control struct {
 	conn net.Conn
 	r    *bufio.Reader
 
 	authenticated bool
+
+	// broken records that a command failed mid-exchange. The reply stream is
+	// then out of sync — the next command would read the previous one's tail —
+	// so the connection has to be discarded rather than reused.
+	broken bool
+
+	// newnymMu guards lastNewnym alone, which NewnymWait reads without holding
+	// the instance's control lock.
+	newnymMu sync.Mutex
 
 	// lastNewnym is when this connection last sent an effective NEWNYM. Tor
 	// exposes no way to query its own cooldown timer, so tracking it here is
@@ -105,11 +125,20 @@ func (c *Control) Signal(name string) error {
 		return err
 	}
 	if strings.EqualFold(name, "NEWNYM") {
+		c.newnymMu.Lock()
 		c.lastNewnym = time.Now()
+		c.newnymMu.Unlock()
 		// The exit we were reporting is exactly the one this signal retired.
 		c.lastExit = ""
 	}
 	return nil
+}
+
+// newnymAt returns when this connection last signalled NEWNYM.
+func (c *Control) newnymAt() time.Time {
+	c.newnymMu.Lock()
+	defer c.newnymMu.Unlock()
+	return c.lastNewnym
 }
 
 // GetInfo returns the value of a single GETINFO key.
@@ -124,17 +153,41 @@ func (c *Control) GetInfo(key string) (string, error) {
 	return parseGetInfo(reply, key)
 }
 
+// ConfValue is one SETCONF assignment. An empty Value resets the option to its
+// compiled-in default.
+type ConfValue struct{ Key, Value string }
+
 // SetConf applies configuration at runtime, e.g. SetConf("ExitNodes", "{us}").
 // An empty value resets the option to its default.
 func (c *Control) SetConf(key, value string) error {
+	return c.SetConfAll(ConfValue{key, value})
+}
+
+// SetConfAll applies several options in one SETCONF.
+//
+// One command rather than several matters for options that only make sense
+// together: setting StrictNodes before ExitNodes leaves tor briefly refusing to
+// build any circuit at all, and setting it after leaves a window where the pin
+// is advisory.
+func (c *Control) SetConfAll(values ...ConfValue) error {
 	if !c.authenticated {
 		return ErrNotAuthenticated
 	}
-	cmd := "SETCONF " + key
-	if value != "" {
-		cmd += "=" + quoteControlValue(value)
+	if len(values) == 0 {
+		return nil
 	}
-	_, err := c.command(cmd)
+
+	var sb strings.Builder
+	sb.WriteString("SETCONF")
+	for _, v := range values {
+		sb.WriteByte(' ')
+		sb.WriteString(v.Key)
+		if v.Value != "" {
+			sb.WriteByte('=')
+			sb.WriteString(quoteControlValue(v.Value))
+		}
+	}
+	_, err := c.command(sb.String())
 	return err
 }
 
@@ -173,10 +226,11 @@ const NewnymCooldown = 10 * time.Second
 // controller is invisible to us — the pool keeps one long-lived connection per
 // instance precisely so this stays accurate.
 func (c *Control) NewnymWait() time.Duration {
-	if c.lastNewnym.IsZero() {
+	last := c.newnymAt()
+	if last.IsZero() {
 		return 0
 	}
-	if remaining := NewnymCooldown - time.Since(c.lastNewnym); remaining > 0 {
+	if remaining := NewnymCooldown - time.Since(last); remaining > 0 {
 		return remaining
 	}
 	return 0
@@ -184,6 +238,9 @@ func (c *Control) NewnymWait() time.Duration {
 
 // Newnym waits out any remaining cooldown, then requests a new circuit. It
 // returns early if ctx is cancelled while waiting.
+//
+// Prefer Instance.Newnym, which does the waiting without holding the instance's
+// control lock; this blocks with it held.
 func (c *Control) Newnym(ctx context.Context) error {
 	if wait := c.NewnymWait(); wait > 0 {
 		timer := time.NewTimer(wait)
@@ -216,23 +273,24 @@ var errNoUsableCircuit = errors.New("tor: no usable exit circuit yet")
 // which costs no Tor bandwidth — unlike fetching an IP-echo URL through the
 // circuit. It is the real exit address a target site would see.
 //
-// The answer has to be *stable*, not merely current. Tor holds several built
-// circuits at once and keeps building more preemptively, so naming whichever is
-// newest makes the reported exit flip between relays no traffic ever used —
-// which is what makes an instance look like it has two exits at once. selectExit
-// holds the choice still; see it for the ordering.
-func (c *Control) ExitNode() (ExitNode, error) {
+// The second return value says whether a stream confirmed the answer. Only a
+// circuit tor has actually attached traffic to proves where this instance goes
+// out; anything else is inferred from the circuits standing around, several of
+// which tor built preemptively and no request will ever use. Callers must not
+// let an inferred answer overwrite a confirmed one — that is what made a
+// rotation look like the exit IP jumped a couple of times before settling.
+func (c *Control) ExitNode() (node ExitNode, confirmed bool, err error) {
 	circuits, err := c.GetInfo("circuit-status")
 	if err != nil {
-		return ExitNode{}, err
+		return ExitNode{}, false, err
 	}
 	// Best effort: without stream-status the choice falls back to the circuit
 	// set alone, which is what happens between requests anyway.
 	streams, _ := c.GetInfo("stream-status")
 
-	fp := c.selectExit(parseCircuits(circuits), streams)
+	fp, confirmed := c.selectExit(parseCircuits(circuits), streams)
 	if fp == "" {
-		return ExitNode{}, errNoUsableCircuit
+		return ExitNode{}, false, errNoUsableCircuit
 	}
 	// Record the choice before the lookups so a failing consensus query leaves
 	// the next call on the same circuit rather than moving it.
@@ -240,9 +298,9 @@ func (c *Control) ExitNode() (ExitNode, error) {
 
 	desc, err := c.GetInfo("ns/id/" + fp)
 	if err != nil {
-		return ExitNode{Fingerprint: fp}, err
+		return ExitNode{Fingerprint: fp}, confirmed, err
 	}
-	node := parseNetworkStatus(desc)
+	node = parseNetworkStatus(desc)
 	node.Fingerprint = fp
 
 	// Country is a separate lookup and is best-effort: tor only answers when a
@@ -252,7 +310,7 @@ func (c *Control) ExitNode() (ExitNode, error) {
 			node.Country = strings.ToUpper(strings.TrimSpace(cc))
 		}
 	}
-	return node, nil
+	return node, confirmed, nil
 }
 
 // circuit is one BUILT, exit-bearing circuit as circuit-status reported it.
@@ -269,43 +327,50 @@ func (c circuit) canCarryStream() bool { return c.purpose != "CONFLUX_UNLINKED" 
 
 // selectExit picks which circuit's exit to report, most trustworthy first:
 //
-//  1. the circuit carrying a stream — the only one tor has committed traffic to;
+//  1. the circuit carrying a stream — the only one tor has committed traffic to,
+//     and the only answer that comes back confirmed;
 //  2. the exit reported last time, as long as a circuit to it still stands, so
 //     an idle instance keeps naming one identity;
 //  3. the newest circuit, when there is nothing better to go on.
+//
+// Only the first is evidence. The other two are inferred from circuits tor may
+// well have built preemptively and never used, so they come back unconfirmed and
+// must never displace a confirmed answer.
 //
 // Circuits built before the last NEWNYM are excluded outright. That signal marks
 // every existing circuit unusable for new streams, so their exits are no longer
 // where this instance goes out; reporting one alongside a replacement circuit is
 // what made a rotation look like it toggled between two relays.
-func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
+func (c *Control) selectExit(circuits []circuit, streamStatus string) (exit string, confirmed bool) {
+	newnym := c.newnymAt()
+
 	usable := make([]circuit, 0, len(circuits))
 	for _, cc := range circuits {
 		if !cc.canCarryStream() {
 			continue
 		}
-		if c.lastNewnym.IsZero() || cc.created.After(c.lastNewnym) {
+		if newnym.IsZero() || cc.created.After(newnym) {
 			usable = append(usable, cc)
 		}
 	}
 	if len(usable) == 0 {
-		return ""
+		return "", false
 	}
 
-	if ids := streamCircuitIDs(streamStatus); len(ids) > 0 {
+	if ids := attachedCircuitIDs(streamStatus); len(ids) > 0 {
 		// The most recently attached stream is the best evidence of where this
 		// instance is going out right now.
 		attached := ids[len(ids)-1]
 		for _, cc := range usable {
 			if cc.id == attached {
-				return cc.exit
+				return cc.exit, true
 			}
 		}
 	}
 	if c.lastExit != "" {
 		for _, cc := range usable {
 			if cc.exit == c.lastExit {
-				return cc.exit
+				return cc.exit, false
 			}
 		}
 	}
@@ -318,17 +383,33 @@ func (c *Control) selectExit(circuits []circuit, streamStatus string) string {
 			newest = cc
 		}
 	}
-	return newest.exit
+	return newest.exit, false
 }
 
-// streamCircuitIDs lists the circuits currently carrying streams, in the order
-// stream-status reported them. It is empty between requests, which is the normal
-// case for an idle instance.
+// attachedCircuitIDs lists the circuits carrying a *connected* stream, in the
+// order stream-status reported them. It is empty between requests, which is the
+// normal case for an idle instance.
 //
 // stream-status lines look like:
 //
 //	<streamID> SUCCEEDED <circuitID> example.com:443
-func streamCircuitIDs(streamStatus string) []string {
+func attachedCircuitIDs(streamStatus string) []string {
+	return circuitIDsWithStreams(streamStatus, true)
+}
+
+// busyCircuitIDs lists every circuit tor has a stream on, whatever state that
+// stream is in.
+//
+// This is deliberately wider than attachedCircuitIDs. A stream that has been
+// given a circuit but has not connected yet — SENTCONNECT while the exit opens
+// the TCP connection, RESOLVE_WAIT while it looks the name up — is a request in
+// flight, and that phase lasts as long as the destination takes to answer.
+// Closing its circuit is exactly how a rotation used to drop live requests.
+func busyCircuitIDs(streamStatus string) []string {
+	return circuitIDsWithStreams(streamStatus, false)
+}
+
+func circuitIDsWithStreams(streamStatus string, connectedOnly bool) []string {
 	var ids []string
 	for line := range strings.SplitSeq(streamStatus, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
@@ -336,7 +417,10 @@ func streamCircuitIDs(streamStatus string) []string {
 			continue
 		}
 		// NEW and NEWRESOLVE streams have no circuit yet; their circuit id is 0.
-		if fields[1] != "SUCCEEDED" || fields[2] == "0" {
+		if fields[2] == "0" {
+			continue
+		}
+		if connectedOnly && fields[1] != "SUCCEEDED" {
 			continue
 		}
 		ids = append(ids, fields[2])
@@ -354,25 +438,54 @@ func streamCircuitIDs(streamStatus string) []string {
 // a retired conflux set. Closing them forces tor to rebuild immediately, which
 // is what makes a rotation take effect on the next request rather than eventually.
 //
-// Circuits carrying a stream are left alone. A proxy connection is pinned to its
-// instance for its whole life, so cutting one would fail a request already in
-// flight — including an idle HTTP CONNECT tunnel, whose stream stays open
-// between requests.
+// Circuits carrying a stream are left alone, whether or not that stream has
+// connected yet. A proxy connection is pinned to its instance for its whole life,
+// so cutting one would fail a request already in flight — including one still
+// waiting on the exit to reach the destination, and an idle HTTP CONNECT tunnel
+// whose stream stays open between requests.
 func (c *Control) CloseRetiredCircuits() (int, error) {
 	if !c.authenticated {
 		return 0, ErrNotAuthenticated
 	}
-	if c.lastNewnym.IsZero() {
+	newnym := c.newnymAt()
+	if newnym.IsZero() {
 		return 0, nil
 	}
 
+	return c.closeIdleCircuits(func(cc circuit) bool {
+		return !cc.created.IsZero() && cc.created.Before(newnym)
+	})
+}
+
+// CloseCircuitsExceptExit tears down every idle exit circuit that does not leave
+// through the given relay, and reports how many it closed.
+//
+// A pin only governs the circuits tor builds afterwards. The ones already
+// standing keep their own exits, and tor will happily attach the next stream to
+// one of them — so a pin that does not clear them is a pin the traffic ignores.
+func (c *Control) CloseCircuitsExceptExit(fingerprint string) (int, error) {
+	if !c.authenticated {
+		return 0, ErrNotAuthenticated
+	}
+	return c.closeIdleCircuits(func(cc circuit) bool { return cc.exit != fingerprint })
+}
+
+// closeIdleCircuits closes the circuits doomed reports, sparing any that carries
+// a stream.
+func (c *Control) closeIdleCircuits(doomed func(circuit) bool) (int, error) {
 	circuits, err := c.GetInfo("circuit-status")
 	if err != nil {
 		return 0, err
 	}
-	streams, _ := c.GetInfo("stream-status")
+	streams, err := c.GetInfo("stream-status")
+	if err != nil {
+		// Without the stream list there is no way to tell a live request's
+		// circuit from an abandoned one, and guessing wrong drops the request.
+		// The circuits stay standing; tor retires them on its own schedule.
+		return 0, fmt.Errorf("cannot tell which circuits are busy: %w", err)
+	}
 	busy := make(map[string]bool, 4)
-	for _, id := range streamCircuitIDs(streams) {
+	for _, id := range busyCircuitIDs(streams) {
 		busy[id] = true
 	}
 
@@ -381,7 +494,7 @@ func (c *Control) CloseRetiredCircuits() (int, error) {
 		errs   []error
 	)
 	for _, cc := range parseCircuits(circuits) {
-		if busy[cc.id] || cc.created.IsZero() || cc.created.After(c.lastNewnym) {
+		if busy[cc.id] || !doomed(cc) {
 			continue
 		}
 		if _, err := c.command("CLOSECIRCUIT " + cc.id); err != nil {
@@ -505,18 +618,44 @@ func parseNetworkStatus(desc string) ExitNode {
 	return node
 }
 
+// ErrControlBroken means a previous command left the reply stream out of sync,
+// so this connection can no longer be used. The instance redials rather than
+// trying to recover a stream whose framing is unknown.
+var ErrControlBroken = errors.New("tor: control connection is out of sync")
+
+// Broken reports whether this connection has to be discarded.
+func (c *Control) Broken() bool { return c.broken }
+
 // command writes one command and reads its complete reply.
+//
+// An I/O failure part-way through poisons the connection: the reply this
+// command did not finish reading would be read as the next command's, so the
+// connection is marked broken instead of silently answering the wrong question.
 func (c *Control) command(cmd string) (string, error) {
 	if c.conn == nil {
 		return "", errors.New("tor: control connection is closed")
 	}
+	if c.broken {
+		return "", ErrControlBroken
+	}
+
+	if err := c.conn.SetDeadline(time.Now().Add(commandTimeout)); err != nil {
+		c.broken = true
+		return "", fmt.Errorf("set control deadline: %w", err)
+	}
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
 	if _, err := fmt.Fprintf(c.conn, "%s\r\n", cmd); err != nil {
+		c.broken = true
 		return "", fmt.Errorf("write %s: %w", commandName(cmd), err)
 	}
 	code, reply, err := c.readReply()
 	if err != nil {
+		c.broken = true
 		return "", fmt.Errorf("%s: %w", commandName(cmd), err)
 	}
+	// A non-2xx reply is a complete, well-framed answer: tor said no. The
+	// connection stays usable.
 	if code < 200 || code >= 300 {
 		return "", &ControlError{Code: code, Reply: reply, Cmd: commandName(cmd)}
 	}

@@ -3,6 +3,7 @@ package tor
 import (
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,19 @@ func (discardConn) RemoteAddr() net.Addr             { return dummyAddr{} }
 func (discardConn) SetDeadline(time.Time) error      { return nil }
 func (discardConn) SetReadDeadline(time.Time) error  { return nil }
 func (discardConn) SetWriteDeadline(time.Time) error { return nil }
+
+// recordConn is a discardConn that keeps what was written to it, for tests that
+// care about the exact command sent.
+type recordConn struct{ sb *strings.Builder }
+
+func (c recordConn) Read([]byte) (int, error)       { return 0, io.EOF }
+func (c recordConn) Write(b []byte) (int, error)    { return c.sb.Write(b) }
+func (recordConn) Close() error                     { return nil }
+func (recordConn) LocalAddr() net.Addr              { return dummyAddr{} }
+func (recordConn) RemoteAddr() net.Addr             { return dummyAddr{} }
+func (recordConn) SetDeadline(time.Time) error      { return nil }
+func (recordConn) SetReadDeadline(time.Time) error  { return nil }
+func (recordConn) SetWriteDeadline(time.Time) error { return nil }
 
 type dummyAddr struct{}
 
