@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -198,5 +199,27 @@ func TestDrop(t *testing.T) {
 	}
 	if s.drop("a") {
 		t.Error("dropping twice should report nothing removed")
+	}
+}
+
+func TestListIsOrderedByKey(t *testing.T) {
+	// Go randomises map iteration, and this snapshot feeds a table the dashboard
+	// re-polls every few seconds: an unstable order reshuffles the rows under the
+	// operator, so a click lands on whichever session moved into that row.
+	s := newSessions(time.Minute, 100)
+	now := time.Now()
+	for _, key := range []string{"delta", "alpha", "charlie", "bravo"} {
+		s.pin(key, 0, now)
+	}
+
+	want := []string{"alpha", "bravo", "charlie", "delta"}
+	for range 20 {
+		var got []string
+		for _, sess := range s.list() {
+			got = append(got, sess.Key)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("list() = %v, want %v", got, want)
+		}
 	}
 }

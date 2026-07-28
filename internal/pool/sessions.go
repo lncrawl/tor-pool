@@ -3,6 +3,8 @@
 package pool
 
 import (
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -162,7 +164,12 @@ func (s *sessions) drop(key string) bool {
 	return ok
 }
 
-// list returns a snapshot of all sessions.
+// list returns a snapshot of all sessions, ordered by key.
+//
+// The order has to be stable for the same reason the fleet sorts its instances:
+// this feeds a polled table. Go randomises map iteration, so an unsorted
+// snapshot reshuffles the rows on every poll — and a caller who clicks "drop" on
+// a row acts on whichever session landed there in the meantime.
 func (s *sessions) list() []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -170,6 +177,7 @@ func (s *sessions) list() []Session {
 	for _, sess := range s.byKey {
 		out = append(out, *sess)
 	}
+	slices.SortFunc(out, func(a, b Session) int { return strings.Compare(a.Key, b.Key) })
 	return out
 }
 
