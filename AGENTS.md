@@ -47,6 +47,7 @@ plus golangci-lint, plus a container run that exercises whatever you touched.
 
 ```
 cmd/torpool/       entrypoint: env → wire → run → graceful shutdown
+internal/auth/     credential store (one JSON file), hand-written HS256, tokens, scopes
 internal/config/   env parsing, defaults, validation. The one source of truth for defaults.
 internal/tor/      torrc rendering, the control-port client, tor process supervision
 internal/pool/     instance state machine, session table, assignment, remediation ladder
@@ -71,7 +72,10 @@ docs/              configuration, api, architecture, operations, scraper, develo
   never hold a lock across a network call or a subprocess wait. Every goroutine takes a
   `context.Context` and exits when it is cancelled.
 - **No third-party dependency without a reason.** The standard library covers the SOCKS5 and
-  HTTP proxy paths; keeping the module lean is why the image is small.
+  HTTP proxy paths, the Prometheus exposition and the HS256 tokens; keeping the module lean is
+  why the image is small. Hand-written crypto earns that place only because it is one
+  algorithm this process both issues and verifies — read the rules in `internal/auth/jwt.go`
+  before touching it, and keep its negative tests.
 - **Docs must not restate tuning numbers.** Name the constant or the file that holds the value
   (`internal/config`) instead of copying it into prose that will rot.
 
@@ -123,9 +127,10 @@ isn't.
     the pool silently runs under strength. `BOOTSTRAP_STALL_TIMEOUT` restarts on *lack of
     progress*, never on elapsed time, because a slow consensus fetch is not a stall.
 11. **Session keys are untrusted input.** They arrive as a SOCKS5 username or a
-    `Proxy-Authorization` header from whoever can reach the proxy port. Bound the session table
-    (`MAX_SESSIONS`), and never interpolate a key into a log message, a torrc, or a shell command
-    without escaping it.
+    `Proxy-Authorization` header. Authentication narrows *who* can send one but does not make
+    them trusted, and a key is still not a tenancy boundary — any valid token may claim any key.
+    Bound the session table (`MAX_SESSIONS`), and never interpolate a key into a log message, a
+    torrc, or a shell command without escaping it.
 12. **The instance port blocks must not collide with the listeners.** `internal/config`
     validates this at boot; if you add a listener, add it to that check too. An instance index
     maps to a fixed pair of ports in two blocks a fixed distance apart, so indexes are *reused*
@@ -136,7 +141,25 @@ isn't.
 14. **Nothing on a request path may block on a control port.** A command can take as long as the
     NEWNYM cooldown, so the pool's maintenance loop keeps the exit poll on its own goroutine,
     pollers give up rather than queue, and an instance rotation returns once the instance is out
-    of service and finishes the slow half in the background.
+    of service and finishes the slow half in the background. The same rule covers credentials:
+    verification reads an immutable map behind an `atomic.Pointer` and never takes the store's
+    mutex, which sits behind an fsync.
+15. **Authentication is default-closed, and the route table is what makes it so.** Endpoints are
+    data in `internal/server`, each naming a scope, and a test walks that table asserting every
+    route is either in an explicit public allowlist or answers 401. Registering handlers one at a
+    time is default-*open*: the failure is an endpoint added later with no scope, which nothing
+    catches. `http.ServeMux` does not expose its patterns, so the table has to be data for the
+    test to exist at all. Only `/health`, `/metrics`, the login endpoint and the dashboard's
+    static assets are public.
+16. **The credential is a header, never a cookie.** That is the only reason there is no CSRF
+    defence anywhere in `internal/server` and none is needed — every mutating endpoint would
+    become cross-site triggerable the day someone adds a "remember me" cookie. It is also not a
+    substitute for TLS: nothing here encrypts, so the loopback-publishing guidance in the README
+    and `compose.yml` stays.
+17. **A refused credential is logged, never recorded as an event.** The event ring is bounded, so
+    one entry per rejected proxy connection lets anyone flush the entire audit history in
+    seconds, precisely when it matters — and every rejection would serialise through the mutex
+    the dashboard streams through. Only operator actions are events.
 
 ## Skills
 

@@ -28,9 +28,36 @@ no traffic never records a failure for the ladder to act on — so the pool quie
 under strength. The first restart keeps the state directory; a second wipes it, because a
 poisoned cached consensus is the usual cause. Set it to `0` to disable the check.
 
+## Authentication
+
+`ADMIN_USER` and `ADMIN_PASSWORD` are the dashboard login. Leaving the password unset is
+a real option rather than an insecure one: the first boot generates a 128-bit password,
+prints it once, and stores only its digest — which is safe precisely because a random
+password of that size is not a dictionary target. A password you supply is compared in
+memory and never written anywhere, so nothing on disk can be attacked offline. The
+trade-off is that a generated one only survives while `DATA_DIR` does.
+
+Changing either variable invalidates every dashboard session immediately, which is what
+you want after a credential is exposed and is why there is no separate "sign out
+everywhere".
+
+`LOGIN_TTL` is how long a session lasts; there is no refresh, so it is the whole
+lifetime. Longer is more convenient and leaves a stolen credential usable for longer.
+
+`LOGIN_RATE_LIMIT` bounds wrong passwords per minute from one address. Behind a reverse
+proxy every caller shares the proxy's address, so the limit becomes global — set it
+higher there, or accept that one attacker can lock out the operator.
+
+`PROXY_TOKEN` fixes a proxy credential in configuration, for deployments provisioned from
+files rather than by hand. It is verified like any minted token but never persisted,
+because the environment is authoritative: seeding it into the store would leave a stale
+value working after the variable changed. Everything else is minted in the dashboard,
+where a token can also be revoked individually — which is the reason tokens exist rather
+than one shared secret.
+
 ## Sessions
 
-`DEFAULT_SESSION` decides what happens when a caller sends no credentials:
+`DEFAULT_SESSION` decides what happens when an authenticated caller names no session:
 
 - `ip` — pin per client IP. Plain `curl` is sticky. The default.
 - `random` — a new instance per connection. Nothing is sticky; use it when you want

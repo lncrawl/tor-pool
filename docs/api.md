@@ -1,9 +1,87 @@
 # API
 
-No authentication. The API can restart instances and resize the pool, so publish port
-8080 to loopback only.
+Base URL in the examples: `http://127.0.0.1:8080`. Every example below needs the
+`Authorization` header from the next section; it is left out to keep them readable.
 
-Base URL in the examples: `http://127.0.0.1:8080`.
+Keep 8080 on loopback even so. Requiring a credential is defence in depth, not a
+substitute for TLS — there is none here, so passwords and tokens cross the wire in
+cleartext.
+
+## Authentication
+
+Everything under `/api/` requires a credential. `GET /health`, `GET /metrics`,
+`POST /api/auth/login` and the dashboard's static assets do not.
+
+Two kinds of credential, both sent as `Authorization: Bearer …`:
+
+| | Obtained by | Used for |
+| --- | --- | --- |
+| **Session** (JWT) | signing in | the dashboard, and anything interactive |
+| **Token** (`tp_…`) | minting one | scrapers, monitoring, CI |
+
+A token also authenticates the proxy ports, where it is the *password* and the
+username stays the session key — see [scraper.md](scraper.md).
+
+### Scopes
+
+A token carries one:
+
+- **`proxy`** — proxy traffic, plus the session routes a caller uses to manage the
+  sessions it created: `GET /api/sessions/{key}`, `POST …/rotate`, `POST …/failure`.
+- **`admin`** — everything, proxy traffic included.
+
+Give a scraper `proxy`. Under `admin` the credential in its config could also resize
+the pool, restart instances and read every session key.
+
+### `POST /api/auth/login`
+
+```bash
+curl -XPOST localhost:8080/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"user":"admin","password":"…"}'
+# {"token":"eyJ…","expires":1785364800,"user":"admin"}
+```
+
+On a first run the password is generated and printed once to the container log. Set
+`ADMIN_PASSWORD` to choose your own; one you set is never written to disk.
+
+A wrong username and a wrong password are answered identically. Repeated failures from
+one address are refused with `429` and a `Retry-After`.
+
+Signing out is a client-side act: a session is valid until `expires`, so there is
+nothing to revoke. Changing `ADMIN_USER` or `ADMIN_PASSWORD` invalidates every
+outstanding session immediately.
+
+### `POST /api/auth/ticket`
+
+```bash
+curl -XPOST localhost:8080/api/auth/ticket -H "Authorization: Bearer $JWT"
+# {"ticket":"eyJ…","expires_in":60}
+```
+
+`EventSource` cannot send headers, so the dashboard's stream authenticates with a
+short-lived ticket in the query string instead: `GET /api/stream?ticket=…`.
+
+A ticket is good for the stream and nothing else — it is rejected everywhere else, and
+cannot mint another. A normal session works on `/api/stream` through the header, which
+is how `curl -N` reads it.
+
+### `GET /api/tokens` · `POST /api/tokens` · `DELETE /api/tokens/{id}`
+
+```bash
+curl -XPOST localhost:8080/api/tokens \
+  -H 'content-type: application/json' \
+  -d '{"name":"scraper-prod","scope":"proxy"}'
+# {"id":"XkOC5l5K","name":"scraper-prod","scope":"proxy","source":"store",
+#  "created_at":1785275812,"secret":"tp_7Kq2mXvR8nB4jL6wYtZaPc"}
+```
+
+`secret` appears in that one response and nowhere else: only its digest is stored, so a
+lost token means minting another. Listing never returns it.
+
+`DELETE` answers `204`, and the token stops working immediately — before the change
+reaches disk, so a revoke cannot be undone by a restart. A token from `PROXY_TOKEN` is
+configuration and answers `409`: change it in the environment and restart.
 
 ## Pool
 
@@ -181,6 +259,13 @@ never applies backpressure to proxied traffic.
 
 ## Errors
 
-Plain text with a matching status. `404` unknown instance or session, `400` bad input,
-`503` when nothing can serve the request. An unmatched `/api/` path returns `404` rather
-than falling through to the dashboard.
+Plain text with a matching status. `404` unknown instance, session or token, `400` bad
+input, `503` when nothing can serve the request.
+
+`401` is a missing, malformed or expired credential, and always carries a
+`WWW-Authenticate` header. `403` is a valid credential without the scope for that route,
+and deliberately carries no challenge — there is nothing to retry with, so a client that
+signs out on a `401` must not do so on a `403`.
+
+An unmatched `/api/` path is authenticated first and only then `404`s, so the surface
+does not report which endpoints exist. It never falls through to the dashboard.

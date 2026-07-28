@@ -34,19 +34,25 @@ service.
   ~40 MB image.
 
 > [!WARNING]
-> The API has **no authentication** and can restart instances and resize the pool.
-> Publish port 8080 to `127.0.0.1` only, as the compose file does.
+> There is no TLS. Passwords and tokens cross the wire in cleartext, so publish these
+> ports to `127.0.0.1` only, as the compose file does, unless something terminating TLS
+> sits in front.
 
 ## Quick start
 
 ```bash
 docker run -d --name tor-pool \
   -e POOL_SIZE=5 \
+  -v tor_data:/var/lib/tor \
   -p 127.0.0.1:9250:9250 \
   -p 127.0.0.1:9251:9251 \
   -p 127.0.0.1:8080:8080 \
   ghcr.io/lncrawl/tor-pool:latest
 ```
+
+The volume is not optional in practice: the credentials generated on first boot live
+there, and without it every recreate mints new ones. Set `ADMIN_PASSWORD` and
+`PROXY_TOKEN` yourself if you would rather provision them from config.
 
 Or with compose — copy [`.env.example`](.env.example) to `.env` and run
 `docker compose up -d`.
@@ -55,24 +61,36 @@ Or with compose — copy [`.env.example`](.env.example) to `.env` and run
 `:X.Y.Z` for a deployment you want to be reproducible, or use `:edge` to run the tip of
 `main`.
 
+First boot prints the dashboard password and a proxy token, once:
+
+```
+docker logs tor-pool
+#   dashboard    admin / 6b242a0eaf04f629d03ab557ab653c9d
+#   proxy token  tp_o6e4G3fwgKYfXMU2svTy7g
+```
+
 The pool serves as soon as its first instance finishes bootstrapping, usually within
-30 seconds. Then prove it works — same username twice, then a different one:
+30 seconds. Then prove it works — the username is the session key and the token is the
+password. Same username twice, then a different one:
 
 ```bash
-curl --socks5-hostname alice:x@127.0.0.1:9250 https://check.torproject.org/api/ip
+T=tp_o6e4G3fwgKYfXMU2svTy7g
+
+curl --socks5-hostname alice:$T@127.0.0.1:9250 https://check.torproject.org/api/ip
 # {"IsTor":true,"IP":"185.220.101.5"}
-curl --socks5-hostname alice:x@127.0.0.1:9250 https://check.torproject.org/api/ip
+curl --socks5-hostname alice:$T@127.0.0.1:9250 https://check.torproject.org/api/ip
 # {"IsTor":true,"IP":"185.220.101.5"}   ← same session, same exit
 
-curl --socks5-hostname bob:x@127.0.0.1:9250 https://check.torproject.org/api/ip
+curl --socks5-hostname bob:$T@127.0.0.1:9250 https://check.torproject.org/api/ip
 # {"IsTor":true,"IP":"192.42.116.19"}   ← different session, different exit
 
-curl -XPOST localhost:8080/api/sessions/alice/rotate
-curl --socks5-hostname alice:x@127.0.0.1:9250 https://check.torproject.org/api/ip
+curl -XPOST -H "Authorization: Bearer $T" \
+  localhost:8080/api/sessions/alice/rotate
+curl --socks5-hostname alice:$T@127.0.0.1:9250 https://check.torproject.org/api/ip
 # {"IsTor":true,"IP":"94.142.244.16"}   ← alice moved, instantly
 ```
 
-Then open <http://localhost:8080>.
+Then open <http://localhost:8080> and sign in.
 
 > [!NOTE]
 > Pulling from GHCR needs no login for a public package. If you get a 403, the package
@@ -115,9 +133,9 @@ flowchart LR
 ```
 
 **Sticky sessions.** The SOCKS5 username, or the `Proxy-Authorization` user over HTTP,
-identifies a session. A caller with no credentials is pinned by client IP
-(`DEFAULT_SESSION`), so plain `curl` is sticky too. Credentials are *not* forwarded to
-Tor: doing so would trigger Tor's own stream isolation and give two callers on the same
+identifies a session; the password is the token that authorises the connection. A caller
+that authenticates but names no session is pinned by client IP (`DEFAULT_SESSION`).
+Credentials are *not* forwarded to Tor: doing so would trigger Tor's own stream isolation and give two callers on the same
 instance different exits, which would make "an instance is an exit identity" untrue.
 
 **Failure signals.** Two, because neither is enough alone. The pool sees transport
@@ -148,9 +166,11 @@ Everything is an environment variable. The common ones:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `ADMIN_PASSWORD` | generated | Dashboard login. Generated and logged on first boot if unset. |
+| `PROXY_TOKEN` | — | A fixed proxy credential, instead of minting one in the dashboard. |
 | `POOL_SIZE` | 5 | Tor instances to run. ~30–40 MB each. |
 | `MIN_READY` | 1 | Serve once this many have bootstrapped. |
-| `DEFAULT_SESSION` | `ip` | How a caller with no credentials is pinned: `ip`, `random`, `shared`. |
+| `DEFAULT_SESSION` | `ip` | How a caller that names no session is pinned: `ip`, `random`, `shared`. |
 | `SESSION_TTL` | 10m | Unpin a session after this long idle. |
 | `QUARANTINE_FAILURES` | 5 | Failures within `FAILURE_WINDOW` before quarantine. |
 | `TOR_EXIT_NODES` | — | Restrict exits, e.g. `{us},{ca}`. |
@@ -190,11 +210,13 @@ With anything else, it is just a proxy:
 ```python
 import httpx
 
-proxy = "socks5h://my-session:x@127.0.0.1:9250"
+token = "tp_7Kq2mXvR8nB4jL6wYtZaPc"
+proxy = f"socks5h://my-session:{token}@127.0.0.1:9250"
 with httpx.Client(proxy=proxy) as client:
     client.get("https://example.com")
 
-httpx.post("http://127.0.0.1:8080/api/sessions/my-session/rotate")
+httpx.post("http://127.0.0.1:8080/api/sessions/my-session/rotate",
+           headers={"Authorization": f"Bearer {token}"})
 ```
 
 ## API
@@ -207,6 +229,8 @@ httpx.post("http://127.0.0.1:8080/api/sessions/my-session/rotate")
 | `POST /api/pool/resize` | Grow or shrink while running |
 | `POST /api/sessions/{key}/rotate` | Move a session to another instance |
 | `POST /api/sessions/{key}/failure` | Report a block you observed |
+| `POST /api/auth/login` | Sign in, returns a session credential |
+| `GET` \| `POST /api/tokens` \| `DELETE /api/tokens/{id}` | Issue and revoke proxy tokens |
 | `GET /api/events` | Audit log |
 | `GET /api/stream` | Live updates over SSE |
 | `GET /metrics` | Prometheus |
@@ -223,9 +247,14 @@ Full reference with examples: [docs/api.md](docs/api.md).
 
 ## Security
 
-- **No authentication on the API.** Keep 8080 on loopback, or put your own auth in front.
-- **Scope the SOCKS and HTTP ports yourself.** Anyone who can reach them can use your
-  Tor bandwidth.
+- **There is no TLS.** The dashboard password, every token and every session credential
+  cross the wire in cleartext. Authentication is defence in depth, not a replacement for
+  keeping these ports on loopback or behind something that terminates TLS.
+- **Give a scraper a `proxy`-scoped token, not an `admin` one.** A `proxy` token moves
+  bytes and manages its own sessions; an `admin` token can also resize the pool, restart
+  instances and read every session key.
+- **A session key is not a boundary.** Any valid token may claim any session key, so
+  sessions separate exit identities, not tenants.
 - **Tor instance ports never leave the container.** That is what makes password-less
   cookie authentication on the control ports safe — do not publish them.
 - **This is not anonymity.** It rotates exit IPs. It does nothing about your TLS

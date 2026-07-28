@@ -3,6 +3,11 @@
 [`lncrawl-scraper`](https://github.com/lncrawl/scraper) has first-class support: it
 keeps a session key, rotates through the pool's API, and reports blocks back.
 
+It needs a token. Mint one in the dashboard's Tokens tab with the `proxy` scope, or take
+the one printed on the pool's first boot. The same token authenticates both the proxy
+port and the session routes `scraper` calls, and a `proxy`-scoped one cannot resize the
+pool or restart instances if the config leaks.
+
 ```python
 from scraper import Scraper, TorPoolProxyUrl, default_config
 
@@ -11,6 +16,7 @@ config.proxy.proxy_urls = [
     TorPoolProxyUrl(
         url="socks5h://127.0.0.1:9250",
         api_url="http://127.0.0.1:8080",
+        token="tp_7Kq2mXvR8nB4jL6wYtZaPc",   # a proxy-scoped token
         session="my-crawl",   # omit for a generated per-Scraper key
     )
 ]
@@ -61,7 +67,8 @@ client, you must do the same:
 
 ```python
 # httpx: build a new client after rotating.
-httpx.post(f"{api}/api/sessions/{key}/rotate")
+httpx.post(f"{api}/api/sessions/{key}/rotate",
+           headers={"Authorization": f"Bearer {token}"})
 client.close()
 client = httpx.Client(proxy=proxy)
 ```
@@ -72,11 +79,29 @@ connection rather than immediately.
 
 ## Without scraper
 
-It is an ordinary SOCKS5 proxy where the username is the session key:
+It is an ordinary SOCKS5 proxy. The username is the session key and the password is your
+token:
 
 ```python
-proxy = "socks5h://my-session:x@127.0.0.1:9250"
+proxy = "socks5h://my-session:tp_7Kq2mXvR8nB4jL6wYtZaPc@127.0.0.1:9250"
 ```
 
-Use `socks5h`, not `socks5`, so DNS resolves inside Tor. The password is required by the
-SOCKS5 handshake and ignored by the pool — any value works.
+Use `socks5h`, not `socks5`, so DNS resolves inside Tor.
+
+Both halves are required. A client that offers no credentials is refused during the
+SOCKS5 handshake, and one with a wrong password gets RFC 1929's rejection — which most
+libraries surface as a generic "SOCKS5 authentication failed" rather than naming the
+password, so check the token first when a connection is refused outright.
+
+The HTTP proxy on 9251 takes the same pair, as ordinary proxy credentials:
+
+```python
+proxy = "http://my-session:tp_7Kq2mXvR8nB4jL6wYtZaPc@127.0.0.1:9251"
+```
+
+Calls to the pool's API need the token too:
+
+```python
+httpx.post(f"{api}/api/sessions/{key}/rotate",
+           headers={"Authorization": f"Bearer {token}"})
+```

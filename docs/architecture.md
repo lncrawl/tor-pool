@@ -6,7 +6,7 @@ One container, one Go binary as PID 1, N `tor` child processes.
 torpool (PID 1)
  ├─ supervisor ──► tor ×N, each with its own SOCKS port,
  │                 control port and DataDirectory on container loopback
- ├─ SOCKS5   :9250   sticky, username = session key
+ ├─ SOCKS5   :9250   sticky, username = session key, password = token
  ├─ HTTP     :9251   CONNECT + absolute-URI
  └─ HTTP     :8080   dashboard, REST, SSE, /metrics, /health
 ```
@@ -32,11 +32,14 @@ short is what produces a corrupt `DataDirectory` on the next start.
 
 ## Sessions and stickiness
 
-A session key is the SOCKS5 username, or the `Proxy-Authorization` user over HTTP. No
-credentials means the key comes from `DEFAULT_SESSION`, so a plain `curl` is sticky too.
+A session key is the SOCKS5 username, or the `Proxy-Authorization` user over HTTP. The
+*password* is the credential — see [api.md](api.md#authentication) — and a caller that
+authenticates without naming a session gets its key from `DEFAULT_SESSION`.
 
-The key is an **identity hint, not access control**. Anyone who can reach the port can
-claim any key; many callers presenting the same key deliberately share an instance.
+The key is still an **identity hint, not a boundary**. Authentication decides who may use
+the pool at all; it does not partition it. Any valid token may claim any key, and many
+callers presenting the same key deliberately share an instance. Sessions separate exit
+identities, not tenants.
 
 New sessions go to the instance with the fewest pinned sessions, with a random
 tie-break — a deterministic tie-break would funnel every new session onto the same

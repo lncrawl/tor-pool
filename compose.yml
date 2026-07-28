@@ -9,6 +9,17 @@ services:
     restart: unless-stopped
 
     environment:
+      # The dashboard login. Left empty, a password is generated on first boot and
+      # printed once to this container's log; it survives restarts because the
+      # tor_data volume does. A password set here is never written to disk.
+      ADMIN_USER: '${ADMIN_USER:-admin}'
+      ADMIN_PASSWORD: '${ADMIN_PASSWORD:-}'
+
+      # A fixed proxy credential, for provisioning from files instead of the
+      # dashboard. Must start with tp_. Empty means the first boot issues one and
+      # prints it.
+      PROXY_TOKEN: '${PROXY_TOKEN:-}'
+
       # How many tor instances to run. Each one is an independent exit identity.
       POOL_SIZE: '${POOL_SIZE:-5}'
 
@@ -32,20 +43,24 @@ services:
       LOG_LEVEL: '${LOG_LEVEL:-info}'
 
     ports:
-      # SOCKS5 proxy — the sticky endpoint your scraper connects to. The SOCKS5
-      # username is the session key.
+      # SOCKS5 proxy — the sticky endpoint your scraper connects to. The username
+      # is the session key and the password is a token:
+      #   socks5h://my-session:tp_xxxxxxxxxxxxxxxxxxxxxx@127.0.0.1:9250
       - '${SOCKS_PUBLISH:-127.0.0.1:9250}:9250'
 
       # HTTP/HTTPS CONNECT proxy, for tools without SOCKS support.
       - '${HTTP_PUBLISH:-127.0.0.1:9251}:9251'
 
-      # Dashboard and REST API. Bound to loopback on the host because there is
-      # no authentication: anyone who can reach this port can restart or drain
-      # instances. Widen this only behind your own auth layer.
+      # Dashboard and REST API. Still bound to loopback even though it now
+      # requires a credential: there is no TLS here, so the password and every
+      # token cross the wire in cleartext. Widen this only behind something that
+      # terminates TLS.
       - '${API_PUBLISH:-127.0.0.1:8080}:8080'
 
-    # Persist tor state so restarts re-bootstrap from a cached consensus
-    # instead of from scratch.
+    # Persist tor state so restarts re-bootstrap from a cached consensus instead
+    # of from scratch. It also holds the credential store, which is what makes a
+    # generated password and its tokens survive `down` and `up` — `down -v`
+    # destroys them and the next boot generates new ones.
     volumes:
       - tor_data:/var/lib/tor
 

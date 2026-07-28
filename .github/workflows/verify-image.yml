@@ -53,24 +53,58 @@ jobs:
       # One instance is enough to prove tor starts, the control port
       # authenticates and bootstrap completes.
       - name: Boot a single-instance pool
+        env:
+          # Fixed rather than generated, so the assertions below can sign in.
+          ADMIN_PASSWORD: ci-only-password
         run: |
+          set -euo pipefail
+
           docker run -d --name torpool-ci \
             -e POOL_SIZE=1 -e LOG_LEVEL=debug \
+            -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
             -p 127.0.0.1:8080:8080 \
             tor-pool:ci
 
+          # /health is public on purpose: the container healthcheck cannot send
+          # a credential either.
+          ready=false
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null; then
               echo "pool became healthy after ${i}0s"
-              curl -s http://127.0.0.1:8080/api/instances
-              exit 0
+              ready=true
+              break
             fi
             sleep 10
           done
+          if [ "$ready" != true ]; then
+            echo "pool never became healthy"
+            docker logs torpool-ci
+            exit 1
+          fi
 
-          echo "pool never became healthy"
-          docker logs torpool-ci
-          exit 1
+          # The negative half, and the only end-to-end proof that authentication
+          # is switched on at all. Note the -f: this step used to run `curl -s`
+          # without it, so a 401 body printed and the step still passed.
+          echo "== unauthenticated /api/instances must be refused =="
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/instances)
+          if [ "$code" != "401" ]; then
+            echo "expected 401, got $code — the API is open"
+            exit 1
+          fi
+
+          echo "== sign in and read the pool =="
+          # Responses are indented JSON, so the pattern has to tolerate the
+          # whitespace around the colon — without it this silently extracts
+          # nothing and the next call fails with a confusing 401.
+          token=$(curl -sf -XPOST http://127.0.0.1:8080/api/auth/login \
+            -H 'content-type: application/json' \
+            -d "{\"user\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" \
+            | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          if [ -z "$token" ]; then
+            echo "login returned no token"
+            exit 1
+          fi
+          curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:8080/api/instances
 
       - name: Container logs
         if: always()

@@ -33,9 +33,15 @@ npm --prefix web run typecheck
 npm --prefix web run build
 ```
 
-The dev server proxies to a torpool container, so bring one up first. `npm run build`
-writes into `internal/server/dist`, which `go:embed` picks up — a committed placeholder
-lives there so `go build` works without ever running npm.
+The dev server proxies to a torpool container, so bring one up first, and sign in with
+its credentials — set `ADMIN_PASSWORD` in your `.env` rather than hunting for the
+generated one in `docker compose logs` every time you recreate the container.
+
+`npm run build` writes into `internal/server/dist`, which `go:embed` picks up — a
+committed placeholder lives there so `go build` works without ever running npm. Do not
+commit the build output over it: the real `index.html` references a hashed asset that is
+not tracked, so a binary built from it serves a broken page. `git checkout
+internal/server/dist/index.html` after building locally.
 
 ## Refreshing the screenshots
 

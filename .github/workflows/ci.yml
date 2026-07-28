@@ -66,6 +66,19 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+      # `npm run build` writes over the committed placeholder, and the real
+      # index.html references a hashed asset that is not tracked — so a binary
+      # built from it serves a broken page to anyone who did not run npm.
+      - name: The committed dashboard placeholder must survive a build
+        working-directory: .
+        run: |
+          if ! git diff --quiet -- internal/server/dist/index.html; then
+            echo "internal/server/dist/index.html was committed as build output."
+            echo "Restore it: git checkout internal/server/dist/index.html"
+            git diff -- internal/server/dist/index.html
+            exit 1
+          fi
+
   image:
     name: Image
     # Shared with the scheduled rebuild, which has to run exactly this check

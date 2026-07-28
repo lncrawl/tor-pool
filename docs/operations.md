@@ -60,6 +60,44 @@ a clock badly out of sync, or an over-restrictive `TOR_EXIT_NODES` combined with
 `POST /api/instances/{id}/restart` wipes its state directory and starts clean, which
 clears a corrupt cached consensus.
 
+## Credentials
+
+The dashboard password and every proxy token live in `auth.json` inside `DATA_DIR`, mode
+0600. It holds digests, never plaintext, so nothing there can be read back — which is
+also why a lost credential is replaced rather than recovered.
+
+**Where did the first-boot credentials go?** They were printed once, at startup:
+
+```bash
+docker compose logs tor-pool | grep -A12 'generated credentials'
+```
+
+Still there as long as the container has not been recreated and the log has not rotated.
+
+**I lost the dashboard password.** Set `ADMIN_PASSWORD` and restart. A password you set
+always wins over a generated one, takes effect immediately, and clears the stored digest
+so removing the variable later generates a fresh password rather than resurrecting the
+old one.
+
+**Sign every session out.** Change `ADMIN_USER` or `ADMIN_PASSWORD` and restart. Every
+outstanding session is bound to both, so all of them stop working at once — there is no
+separate revoke, because a session credential is self-contained and valid until it
+expires.
+
+**Revoke one consumer.** Dashboard → Tokens → Revoke. It stops working immediately,
+before the change reaches disk, so a revoke cannot be undone by a restart. A token from
+`PROXY_TOKEN` is configuration: change the variable and restart.
+
+**Nothing works after a `docker compose down -v`.** That destroys the volume, and with it
+the credential store. The next boot generates a new password and a new token and prints
+them. Set `ADMIN_PASSWORD` and `PROXY_TOKEN` if you would rather they came from config
+and survived anything.
+
+**The pool refuses to start with a message about `auth.json`.** The file is unreadable or
+corrupt. That is deliberately fatal: starting over would silently mint new credentials
+and lock out every consumer while `/health` kept answering 200. Move the file aside to
+start fresh, which discards every issued token, or restore it from a backup.
+
 ## Upgrading
 
 ```bash
@@ -97,4 +135,10 @@ From `/metrics`:
 - `torpool_instance_remediations_total` — climbing steadily means the ladder is
   thrashing; the thresholds are probably too tight.
 
-`/health` is the liveness check and reports routability, not process health.
+`/health` and `/metrics` answer without a credential, so a probe needs no configuration.
+
+Refused credentials are logged at `warn` rather than recorded as events. The audit log is
+a bounded ring, so one entry per rejected connection would let anyone flush its whole
+history in seconds — exactly when it is worth reading. Watch the log for
+`credential refused` instead; operator actions (sign-ins, tokens issued and revoked) *are*
+events and show up in the dashboard.
