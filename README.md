@@ -74,23 +74,25 @@ Then open <http://localhost:8080>.
 > Pulling from GHCR needs no login for a public package. If you get a 403, the package
 > is still private — see the [releasing](.claude/skills/releasing/SKILL.md) notes.
 
-## Why not `multitor` or `rotating-tor-http-proxy`?
+## Is this the right tool?
 
-Both are good at what they do. The differences that matter:
+tor-pool makes one bet: **an exit IP is part of a caller's identity**, so it should stay
+put until that caller asks to move, and the pool should find out when one gets burnt.
+That is worth the moving parts when:
 
-| | tor-pool | [multitor](https://github.com/trimstray/multitor) | [rotating-tor-http-proxy](https://hub.docker.com/r/zhaowde/rotating-tor-http-proxy) |
-| --- | --- | --- | --- |
-| Client keeps one exit | **yes, per session** | no — HAProxy round-robins every connection | no |
-| Rotate on demand | **instant, per session** | NEWNYM, ~10s cooldown | on a timer |
-| Notices a blocked exit | **yes — clients report 403/429/captcha** | no | no |
-| Repairs a bad instance | **new circuit → wipe-restart → backoff** | no | no |
-| Dashboard | **yes** | HAProxy stats page | HAProxy stats page |
-| Resize while running | **yes** | no | no |
-| Runs outside Docker | no | **yes** | no |
+- **A session has to keep its exit** — a login, a cart, a paginated crawl; anything
+  where the IP changing mid-flow gets you challenged or logged out.
+- **You need to move on demand, not on a timer** — and not pay Tor's ~10 second NEWNYM
+  cooldown when you do.
+- **Blocks are invisible to the proxy** — a 403, a 429 or a captcha arrives inside TLS,
+  so only your client can see it, and something has to act on what it reports.
+- **You want to watch the pool** — which exit each instance holds, what is failing, and
+  resize it without a restart.
 
-If you want round-robin across exits with no state, HAProxy in front of N Tor containers
-is simpler and you should use that. tor-pool is for when a caller needs to *keep* an
-identity and you need to know when one gets burnt.
+If none of that applies — any exit will do, and you just want requests spread across
+several — then round-robin over N Tor containers is less code and fewer failure modes,
+and you should do that instead. tor-pool also only runs in Docker, and it manages a pool
+of Tor instances rather than trying to harden Tor itself.
 
 ## How it works
 
