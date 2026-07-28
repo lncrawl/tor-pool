@@ -1,12 +1,25 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, ConfigProvider, Flex, Layout, Switch, Tabs, Typography, theme } from 'antd';
+import {
+  Alert,
+  Badge,
+  Button,
+  ConfigProvider,
+  Flex,
+  Layout,
+  Switch,
+  Tabs,
+  Typography,
+  theme,
+} from 'antd';
 
+import { AuthProvider, useAuth } from './auth';
 import { LiveProvider, useLive } from './live';
 import { surfaces } from './theme';
 import { Events } from './views/Events';
 import { Instances } from './views/Instances';
 import { Overview } from './views/Overview';
 import { Sessions } from './views/Sessions';
+import { Tokens } from './views/Tokens';
 
 const themeKey = 'torpool.theme';
 
@@ -28,9 +41,14 @@ export default function App() {
     <ConfigProvider
       theme={{ algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm }}
     >
-      <LiveProvider>
-        <Shell dark={dark} onToggleTheme={setDark} />
-      </LiveProvider>
+      {/* AuthProvider sits above LiveProvider deliberately: the stream must not
+          be opened before there is a credential to open it with, and it renders
+          the sign-in screen in place of the app when there is none. */}
+      <AuthProvider>
+        <LiveProvider>
+          <Shell dark={dark} onToggleTheme={setDark} />
+        </LiveProvider>
+      </AuthProvider>
     </ConfigProvider>
   );
 }
@@ -43,6 +61,7 @@ function Shell({
   onToggleTheme: (v: boolean) => void;
 }) {
   const { pool, connected } = useLive();
+  const { user, signOut } = useAuth();
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -92,6 +111,9 @@ function Shell({
               checkedChildren="dark"
               unCheckedChildren="light"
             />
+            <Button size="small" onClick={signOut} style={{ whiteSpace: 'nowrap' }}>
+              Sign out{user ? ` (${user})` : ''}
+            </Button>
           </Flex>
         </Flex>
       </Layout.Header>
@@ -114,6 +136,7 @@ function Shell({
             { key: 'overview', label: 'Overview', children: <Overview dark={dark} /> },
             { key: 'instances', label: 'Instances', children: <Instances /> },
             { key: 'sessions', label: 'Sessions', children: <Sessions /> },
+            { key: 'tokens', label: 'Tokens', children: <Tokens /> },
             { key: 'events', label: 'Events', children: <Events /> },
           ]}
         />

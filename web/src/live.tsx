@@ -8,7 +8,9 @@ import {
   type ReactNode,
 } from 'react';
 
+import { api } from './api';
 import type { Instance, Pool, PoolEvent, Sample } from './api';
+import { useAuth } from './auth';
 
 // historyPoints is how many samples the charts keep client-side.
 //
@@ -18,6 +20,10 @@ const historyPoints = 300;
 
 // eventBufferSize bounds the in-tab event list for the same reason.
 const eventBufferSize = 500;
+
+// Reconnect backoff bounds, in milliseconds.
+const retryFloor = 500;
+const retryCeiling = 30_000;
 
 interface StreamFrame {
   pool: Pool;
@@ -50,6 +56,7 @@ export const useLive = () => useContext(LiveContext);
  * goroutine and a ticker, and every view wants the same snapshot anyway.
  */
 export function LiveProvider({ children }: { children: ReactNode }) {
+  const { token } = useAuth();
   const [pool, setPool] = useState<Pool>();
   const [instances, setInstances] = useState<Instance[]>([]);
   const [history, setHistory] = useState<Sample[]>([]);
@@ -61,30 +68,33 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const lastSampleAt = useRef<string>('');
 
   useEffect(() => {
-    // Backfill the charts so they are not empty for the first minute.
-    let cancelled = false;
-    fetch('/api/stats/history')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((samples: Sample[]) => {
-        if (!cancelled && samples.length) {
+    if (!token) return;
+
+    let closed = false;
+    let source: EventSource | undefined;
+    let timer: number | undefined;
+    let attempt = 0;
+
+    // Backfill the charts so they are not empty for the first minute. Through
+    // api so they carry the credential and share the sign-out handling.
+    api
+      .history()
+      .then((samples) => {
+        if (!closed && samples.length) {
           setHistory(samples.slice(-historyPoints));
           lastSampleAt.current = samples[samples.length - 1]?.at ?? '';
         }
       })
       .catch(() => undefined);
 
-    fetch('/api/events?limit=200')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((initial: PoolEvent[]) => {
-        if (!cancelled) setEvents(initial);
+    api
+      .events(200)
+      .then((initial) => {
+        if (!closed) setEvents(initial);
       })
       .catch(() => undefined);
 
-    const source = new EventSource('/api/stream');
-
-    source.addEventListener('open', () => setConnected(true));
-
-    source.addEventListener('state', (e) => {
+    const onState = (e: Event) => {
       const frame: StreamFrame = JSON.parse((e as MessageEvent).data);
       setConnected(true);
       setPool(frame.pool);
@@ -100,21 +110,68 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         return next.slice(-historyPoints);
       });
       lastSampleAt.current = frame.sample.at;
-    });
+    };
 
-    source.addEventListener('event', (e) => {
+    const onEvent = (e: Event) => {
       const event: PoolEvent = JSON.parse((e as MessageEvent).data);
       setEvents((prev) => [event, ...prev].slice(0, eventBufferSize));
-    });
+    };
 
-    // EventSource reconnects on its own; this only reflects the gap in the UI.
-    source.addEventListener('error', () => setConnected(false));
+    const retryLater = () => {
+      if (closed) return;
+      const delay = Math.min(retryCeiling, retryFloor * 2 ** attempt);
+      attempt += 1;
+      timer = window.setTimeout(() => void open(), delay);
+    };
+
+    /**
+     * open mints a fresh ticket and subscribes.
+     *
+     * EventSource cannot send an Authorization header, so the credential travels
+     * in the URL as a ticket that expires in about a minute. That is exactly why
+     * the browser's own reconnection cannot be relied on: it retries the *same
+     * URL*, so after the first blip it would spin forever against a dead ticket
+     * and the dashboard would sit on "reconnecting" until someone reloaded the
+     * page. Owning the loop means each attempt gets a new ticket.
+     */
+    const open = async () => {
+      if (closed) return;
+
+      let ticket: string;
+      try {
+        ticket = (await api.ticket()).ticket;
+      } catch {
+        // A 401 here has already signed the session out through api.ts, which
+        // unmounts this provider. Anything else is transient, so back off.
+        retryLater();
+        return;
+      }
+      if (closed) return;
+
+      const next = new EventSource(`/api/stream?ticket=${encodeURIComponent(ticket)}`);
+      source = next;
+      next.addEventListener('open', () => {
+        attempt = 0;
+        setConnected(true);
+      });
+      next.addEventListener('state', onState);
+      next.addEventListener('event', onEvent);
+      next.addEventListener('error', () => {
+        setConnected(false);
+        next.close();
+        if (source === next) source = undefined;
+        retryLater();
+      });
+    };
+
+    void open();
 
     return () => {
-      cancelled = true;
-      source.close();
+      closed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      source?.close();
     };
-  }, []);
+  }, [token]);
 
   const value = useMemo<LiveState>(
     () => ({ pool, instances, history, events, connected }),

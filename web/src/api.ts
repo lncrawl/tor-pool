@@ -111,8 +111,58 @@ export interface PoolEvent {
   detail?: string;
 }
 
+export type TokenScope = 'proxy' | 'admin';
+
+export interface TokenInfo {
+  id: string;
+  name: string;
+  scope: TokenScope;
+  /** 'store' for an issued token, 'environment' for one set via PROXY_TOKEN. */
+  source: string;
+  created_at: number;
+  last_used?: number;
+}
+
+/** MintedToken is the one and only response that carries a secret. */
+export interface MintedToken extends TokenInfo {
+  secret: string;
+}
+
+export interface LoginResult {
+  token: string;
+  expires: number;
+  user: string;
+}
+
+export interface Ticket {
+  ticket: string;
+  expires_in: number;
+}
+
+// The credential every request carries, and who to tell when it stops working.
+//
+// Module-level rather than React context because this file is not a component:
+// the auth provider writes it on sign-in and clears it on sign-out, and request()
+// reads it. One place attaches the header, one place notices a 401.
+let credential = '';
+let onUnauthorized: (() => void) | undefined;
+
+export function setCredential(token: string, unauthorized?: () => void) {
+  credential = token;
+  onUnauthorized = unauthorized;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, init);
+  const headers = new Headers(init?.headers);
+  if (credential) headers.set('authorization', `Bearer ${credential}`);
+
+  const res = await fetch(path, { ...init, headers });
+  if (res.status === 401) {
+    // Only a 401 signs out. A 403 means the credential is valid and merely
+    // lacks the scope, and signing out on one would loop: sign in, 403, sign
+    // out, sign in.
+    onUnauthorized?.();
+  }
   if (!res.ok) {
     throw new Error((await res.text()).trim() || `${res.status} ${res.statusText}`);
   }
@@ -122,7 +172,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 const post = <T,>(path: string) => request<T>(path, { method: 'POST' });
 
+const postJSON = <T,>(path: string, body: unknown) =>
+  request<T>(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
 export const api = {
+  /**
+   * login exchanges the operator's credentials for a JWT.
+   *
+   * Its own fetch rather than request(): a 401 here is the answer to the
+   * question, not a signal that an existing session died, and it must not carry
+   * a stale credential.
+   */
+  login: async (user: string, password: string): Promise<LoginResult> => {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ user, password }),
+    });
+    if (!res.ok) {
+      throw new Error((await res.text()).trim() || `${res.status} ${res.statusText}`);
+    }
+    return (await res.json()) as LoginResult;
+  },
+
+  /** ticket mints a short-lived credential for the SSE stream. */
+  ticket: () => post<Ticket>('/api/auth/ticket'),
+
+  tokens: () => request<TokenInfo[]>('/api/tokens'),
+  mintToken: (name: string, scope: TokenScope) =>
+    postJSON<MintedToken>('/api/tokens', { name, scope }),
+  revokeToken: (id: string) =>
+    request(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   history: (long = false) => request<Sample[]>(`/api/stats/history${long ? '?range=long' : ''}`),
   events: (limit = 200) => request<PoolEvent[]>(`/api/events?limit=${limit}`),
 
@@ -134,12 +219,7 @@ export const api = {
   drainInstance: (id: number) => post(`/api/instances/${id}/drain`),
 
   rotateAll: () => post('/api/pool/rotate'),
-  resize: (size: number) =>
-    request('/api/pool/resize', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ size }),
-    }),
+  resize: (size: number) => postJSON('/api/pool/resize', { size }),
 
   rotateSession: (key: string, newnym = false) =>
     post(`/api/sessions/${encodeURIComponent(key)}/rotate?newnym=${newnym}`),
