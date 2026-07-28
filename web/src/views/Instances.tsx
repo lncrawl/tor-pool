@@ -86,13 +86,34 @@ export function Instances() {
       width: 190,
       render: (_, r) => {
         if (r.exit_ip) {
-          return (
+          // An unconfirmed exit is inferred from the circuits Tor is holding, and
+          // Tor builds circuits it never uses — so showing it as plainly as a
+          // confirmed one is what made a rotation look like the IP changed twice.
+          const detail = [r.exit_country, r.exit_nickname].filter(Boolean).join(' · ');
+          const cell = (
             <Space direction="vertical" size={0}>
-              <Typography.Text code>{r.exit_ip}</Typography.Text>
+              <Typography.Text code type={r.exit_confirmed ? undefined : 'secondary'}>
+                {r.exit_ip}
+                {r.exit_confirmed ? '' : ' ?'}
+              </Typography.Text>
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                {[r.exit_country, r.exit_nickname].filter(Boolean).join(' · ')}
+                {r.exit_confirmed ? detail : detail || 'not yet used by traffic'}
               </Typography.Text>
             </Space>
+          );
+          if (r.exit_confirmed) {
+            return r.pinned_exit ? (
+              <Tooltip title="Traffic has left through this relay, and the instance is pinned to it.">
+                {cell}
+              </Tooltip>
+            ) : (
+              cell
+            );
+          }
+          return (
+            <Tooltip title="Tor's current best circuit, but no request has used it yet. The first request through this instance confirms or replaces it.">
+              {cell}
+            </Tooltip>
           );
         }
         // A rotation discards the exit and Tor commits to the next one only when

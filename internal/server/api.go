@@ -52,7 +52,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/instances", s.handleInstances)
 	mux.HandleFunc("GET /api/instances/{id}", s.handleInstance)
 	mux.HandleFunc("POST /api/instances/{id}/rotate", s.instanceAction(
-		func(_ *http.Request, id int) error { return s.pool.RotateInstance(id) }))
+		// Started, not awaited: the instance stops taking traffic and its
+		// sessions move before this returns, and what is left is tor's NEWNYM
+		// cooldown — up to ten seconds of nothing worth holding a request open
+		// for. The dashboard sees the new exit arrive over the SSE stream.
+		func(_ *http.Request, id int) error { return s.pool.StartRotateInstance(id) }))
 	mux.HandleFunc("POST /api/instances/{id}/restart", s.instanceAction(
 		func(r *http.Request, id int) error {
 			// Wiping is the default: a restart that keeps its guards and cached
@@ -149,7 +153,14 @@ func (s *Server) handlePool(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handlePoolRotate(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"rotating": s.pool.RotateAll()})
+	queued, alreadyRunning := s.pool.RotateAll()
+	writeJSON(w, map[string]any{
+		"rotating": queued,
+		// The sweep is serial so the pool keeps serving, which means it outlives
+		// this request by roughly tor's cooldown per instance. Saying so is the
+		// difference between "nothing happened" and "it is already happening".
+		"in_progress": alreadyRunning,
+	})
 }
 
 func (s *Server) handlePoolResize(w http.ResponseWriter, r *http.Request) {
@@ -183,9 +194,16 @@ type InstanceView struct {
 	// RetiredExitIP is set only while ExitIP is empty: a rotation discarded that
 	// exit and tor has not committed to a replacement, which for an idle
 	// instance lasts until its next request.
-	RetiredExitIP string               `json:"retired_exit_ip"`
-	Health        pool.HealthView      `json:"health"`
-	Totals        stats.InstanceTotals `json:"totals"`
+	RetiredExitIP string `json:"retired_exit_ip"`
+	// ExitConfirmed says whether traffic has actually left through ExitIP. When
+	// false it is inferred from the circuits tor is holding, several of which it
+	// built preemptively and no request may ever use.
+	ExitConfirmed bool `json:"exit_confirmed"`
+	// PinnedExit is the relay this instance is locked to, when PIN_EXIT_RELAY is
+	// on. Empty means tor is choosing exits for itself.
+	PinnedExit string               `json:"pinned_exit"`
+	Health     pool.HealthView      `json:"health"`
+	Totals     stats.InstanceTotals `json:"totals"`
 }
 
 func (s *Server) instanceViews() []InstanceView {
@@ -214,6 +232,8 @@ func (s *Server) instanceViews() []InstanceView {
 			ExitCountry:   node.Country,
 			ExitNick:      node.Nickname,
 			RetiredExitIP: inst.RetiredExit().Address,
+			ExitConfirmed: inst.ExitConfirmed(),
+			PinnedExit:    inst.PinnedExit(),
 			Health:        health[id],
 			Totals:        collector.Instance(id),
 		})
@@ -256,8 +276,14 @@ func (s *Server) instanceAction(act func(*http.Request, int) error) http.Handler
 
 		if err := act(r, id); err != nil {
 			status := http.StatusInternalServerError
-			if errors.Is(err, errNoSuchInstance) {
+			switch {
+			case errors.Is(err, errNoSuchInstance):
 				status = http.StatusNotFound
+			case errors.Is(err, pool.ErrInstanceNotReady):
+				// The request is well formed and the instance exists; it is the
+				// state that makes the action impossible, and it will not be
+				// impossible for long.
+				status = http.StatusConflict
 			}
 			http.Error(w, err.Error(), status)
 			return
@@ -282,6 +308,10 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "instance id must be a number", http.StatusBadRequest)
 		return
 	}
+	if _, ok := s.pool.Fleet().Get(id); !ok {
+		http.Error(w, errNoSuchInstance.Error(), http.StatusNotFound)
+		return
+	}
 	writeJSON(w, map[string]any{"instance": id, "sessions_moved": s.pool.DrainInstance(id)})
 }
 
@@ -304,24 +334,26 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSessionRotate(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	newnym := r.URL.Query().Get("newnym") == "true"
+	// A flag is a flag: "1", "yes" and "on" all clearly mean the same thing as
+	// "true", and silently ignoring them made rotation look like it had no
+	// newnym option at all.
+	newnym, _ := strconv.ParseBool(r.URL.Query().Get("newnym"))
 
 	inst, err := s.pool.RotateSession(key, newnym)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	// Read the new instance's exit now rather than serving a value cached from
-	// before the move. It is still a best guess until traffic flows: no stream
-	// is attached to this session yet, so tor has not committed to a circuit.
-	node, err := inst.RefreshExitNode()
-	if err != nil {
-		node = inst.ExitNode()
-	}
 	writeJSON(w, map[string]any{
 		"session":  key,
 		"instance": inst.Index(),
-		"exit_ip":  node.Address,
+		// Whatever the instance last confirmed. Deliberately not re-read here:
+		// no stream of this session is attached yet, so a fresh read would only
+		// name whichever circuit tor happens to be holding — which is exactly
+		// the guess that made a rotation look like it landed on one IP and then
+		// moved to another.
+		"exit_ip":        inst.ExitNode().Address,
+		"exit_confirmed": inst.ExitConfirmed(),
 	})
 }
 

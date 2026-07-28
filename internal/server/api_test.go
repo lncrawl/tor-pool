@@ -180,21 +180,15 @@ func TestMetricsExposition(t *testing.T) {
 	}
 }
 
-func TestDrainReportsZeroForUnknownInstance(t *testing.T) {
-	// Draining nothing is not an error; it moved zero sessions.
+func TestDrainAnswers404ForUnknownInstance(t *testing.T) {
+	// Like every other per-instance action. Answering 200 with sessions_moved: 0
+	// left a caller unable to tell "it had no sessions" from "it does not exist",
+	// which is precisely the case the dashboard hits when a resize retires the
+	// row underneath the button.
 	s := newTestServer(t)
 	rec := do(t, s, http.MethodPost, "/api/instances/5/drain", "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var body struct {
-		SessionsMoved int `json:"sessions_moved"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.SessionsMoved != 0 {
-		t.Errorf("sessions_moved = %d, want 0", body.SessionsMoved)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 

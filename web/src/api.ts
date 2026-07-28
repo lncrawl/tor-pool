@@ -41,6 +41,12 @@ export interface Instance {
   // Set only while exit_ip is empty: the exit a rotation discarded, with no
   // replacement committed to yet.
   retired_exit_ip: string;
+  // Whether traffic has actually left through exit_ip. When false it is inferred
+  // from the circuits tor is holding, several of which it built preemptively and
+  // no request may ever use.
+  exit_confirmed: boolean;
+  // The relay this instance is locked to, when PIN_EXIT_RELAY is on.
+  pinned_exit: string;
   health: Health;
   totals: InstanceTotals;
 }
