@@ -1,0 +1,44 @@
+name: Publish edge
+
+# Every code push to main is published, but it is not a release: `edge` moves,
+# `latest` does not. Making a push the release meant a README fix became a
+# version number, and whatever was half-finished on main became the image most
+# people pull.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # None of these reach the image, and a multi-arch QEMU build is too
+    # expensive to spend on a sentence.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.claude/**'
+      - 'LICENSE'
+
+concurrency:
+  group: edge
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      stamp: ${{ steps.stamp.outputs.stamp }}
+    steps:
+      # Deliberately not a bare version number: anyone reading this off
+      # /api/pool or the dashboard header should be able to tell at a glance
+      # that they are not running a release.
+      - id: stamp
+        run: echo "stamp=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  edge:
+    needs: version
+    uses: ./.github/workflows/build-image.yml
+    permissions:
+      packages: write
+    with:
+      tag-spec: |
+        type=raw,value=edge
+        type=sha,prefix=sha-,format=short
+      version: ${{ needs.version.outputs.stamp }}

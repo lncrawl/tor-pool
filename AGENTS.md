@@ -159,5 +159,8 @@ The globally available `dataviz` skill applies to any chart work in `web/`.
 
 ## Releases
 
-Pushing to `main` bumps a patch tag, which builds and publishes
-`ghcr.io/lncrawl/tor-pool`. GHCR is the only registry. See the `releasing` skill.
+**Publishing an image and cutting a release are separate events.** A push to `main`
+publishes `ghcr.io/lncrawl/tor-pool:edge`; a release is a `vX.Y.Z` tag (or a
+`release.yml` dispatch) and is the only thing that moves `latest`. The version lives in
+`CHANGELOG.md` and nowhere else — the release refuses to run without a section for it.
+GHCR is the only registry. See the `releasing` skill.

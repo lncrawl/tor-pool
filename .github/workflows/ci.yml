@@ -114,5 +114,3 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs torpool-ci || true
-
-  # A `web` job (tsc + vite build) is added alongside the dashboard.

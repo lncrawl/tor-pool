@@ -1,0 +1,127 @@
+name: Release
+
+# A release is a deliberate act, entered either way:
+#
+#   git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+#   gh workflow run release.yml -f version=0.2.0
+#
+# Both land in the same jobs. The dispatch route creates the tag itself, and only
+# after the image has built — a failed build leaves nothing behind to clean up.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 0.2.0)'
+        required: true
+        type: string
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      major: ${{ steps.parse.outputs.major }}
+      minor: ${{ steps.parse.outputs.minor }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Work out the version
+        id: parse
+        env:
+          # A tag push carries it in the ref; a dispatch carries it as an input.
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_VERSION" ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            version="${REF_NAME#v}"
+          fi
+
+          # Semver, with an optional prerelease suffix. Anything else would
+          # produce image tags nobody can reason about.
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$version' is not a semantic version (want 0.2.0 or 0.2.0-rc.1)"
+            exit 1
+          fi
+
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="$major.${rest%%.*}"
+
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+
+          {
+            echo "version=$version"
+            echo "major=$major"
+            echo "minor=$minor"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      # Before the ten minute build, not after: a version with nothing written
+      # about it should fail in seconds.
+      - name: Check the release notes exist
+        run: |
+          set -eu
+          ./.github/release-notes.sh '${{ steps.parse.outputs.version }}' \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+  image:
+    needs: prepare
+    uses: ./.github/workflows/build-image.yml
+    permissions:
+      packages: write
+    with:
+      # A prerelease publishes its exact version and nothing else: moving the
+      # floating tags is what would push a release candidate onto everyone
+      # tracking them.
+      #
+      # No bare major tag while it is 0 either. Under semver the minor is the
+      # breaking-change axis before 1.0, so a `0` tag would carry someone from
+      # 0.1.x straight into an incompatible 0.2.x.
+      tag-spec: |
+        type=raw,value=${{ needs.prepare.outputs.version }}
+        type=raw,value=${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+        type=raw,value=${{ needs.prepare.outputs.major }},enable=${{ needs.prepare.outputs.prerelease == 'false' && needs.prepare.outputs.major != '0' }}
+        type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+      version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    needs: [prepare, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          ./.github/release-notes.sh "$VERSION" > notes.md
+          args=(--title "v$VERSION" --notes-file notes.md)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+
+          # For a dispatch run the tag does not exist yet, so this creates it at
+          # the commit that was built. For a tag push it already points there and
+          # --target is accepted as the same thing.
+          gh release create "v$VERSION" "${args[@]}" --target "$GITHUB_SHA" \
+            || gh release edit "v$VERSION" "${args[@]}"
+
+          echo "Released v$VERSION" >> "$GITHUB_STEP_SUMMARY"

@@ -62,15 +62,24 @@ clears a corrupt cached consensus.
 
 ## Upgrading
 
-The image is rebuilt weekly so a new Alpine `tor` reaches you without a code change.
-Pull and recreate:
-
 ```bash
 docker compose pull && docker compose up -d
 ```
 
 Every instance re-bootstraps, so the pool is briefly at reduced capacity. The volume
 keeps the cached consensus, which makes that fast.
+
+Which tag you pull decides what you get:
+
+| Tag | Moves when | Suits |
+| --- | --- | --- |
+| `latest` | a release is cut | most deployments; what `compose.yml` uses |
+| `X.Y` | a patch release in that line | pinning a minor version, still taking fixes |
+| `X.Y.Z` | never | reproducible deployments — you upgrade on purpose |
+| `edge` | every code push to `main` | trying unreleased work |
+
+Tor itself is installed at image build time, so **a new `tor` release reaches you when you
+pull a newer image**, not on a schedule. Watch the releases if that matters to you.
 
 ## What monitoring to wire up
 

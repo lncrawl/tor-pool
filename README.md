@@ -5,7 +5,7 @@
 **A pool of Tor exits behind one sticky endpoint — that heals itself when an exit gets blocked.**
 
 [![CI](https://github.com/lncrawl/tor-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/ci.yml)
-[![Publish](https://github.com/lncrawl/tor-pool/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/docker-publish.yml)
+[![Release](https://github.com/lncrawl/tor-pool/actions/workflows/release.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/release.yml)
 [![CodeQL](https://github.com/lncrawl/tor-pool/actions/workflows/codeql.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/github/license/lncrawl/tor-pool)](LICENSE)
 
@@ -50,6 +50,10 @@ docker run -d --name tor-pool \
 
 Or with compose — copy [`.env.example`](.env.example) to `.env` and run
 `docker compose up -d`.
+
+`:latest` is the newest [release](https://github.com/lncrawl/tor-pool/releases). Pin
+`:X.Y.Z` for a deployment you want to be reproducible, or use `:edge` to run the tip of
+`main`.
 
 The pool serves as soon as its first instance finishes bootstrapping, usually within
 30 seconds. Then prove it works — same username twice, then a different one:

@@ -3,8 +3,9 @@
 All notable changes are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-Images are published to `ghcr.io/lncrawl/tor-pool` on every push to `main`; see the
-[releasing notes](.claude/skills/releasing/SKILL.md) for what each tag means.
+`ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of
+`main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag
+means.
 
 ## [Unreleased]
 
@@ -64,6 +65,11 @@ Images are published to `ghcr.io/lncrawl/tor-pool` on every push to `main`; see 
 
 ### Changed
 
+- **`latest` now means the newest release, not the last push to `main`.** Every push used
+  to bump a patch tag and move `latest`, so a README fix became a version number and
+  unreleased work reached everyone tracking `latest`. Pushes to `main` publish `edge`;
+  releases are cut deliberately from `CHANGELOG.md`. The weekly rebuild is gone with it —
+  `tor` now updates when you pull a newer image rather than on a timer.
 - **Conflux is off by default** (`TOR_CONFLUX`). Each set Tor pre-builds has its own exit
   relay and successive requests land on different sets, so one instance handed a caller
   several exit IPs with no rotation at all.
@@ -95,5 +101,4 @@ Images are published to `ghcr.io/lncrawl/tor-pool` on every push to `main`; see 
 - **REST API** for instances, sessions, events and history, plus live pool resize.
 - Prometheus metrics at `/metrics`, and a `/health` check that reports routability
   rather than process health.
-- Multi-arch images (`linux/amd64`, `linux/arm64`), rebuilt weekly so a new Alpine
-  `tor` release reaches users without a code change.
+- Multi-arch images (`linux/amd64`, `linux/arm64`) on `ghcr.io/lncrawl/tor-pool`.
