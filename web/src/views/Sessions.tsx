@@ -69,6 +69,10 @@ export function Sessions() {
     {
       title: 'Session key',
       dataIndex: 'key',
+      // Fixed for the same reason as the exit column on the instances table: the
+      // rest of the columns are fixed, so an unsized one is left with the
+      // remainder of scroll.x and wraps a key one character per line.
+      width: 200,
       render: (key: string) => <Typography.Text code>{key}</Typography.Text>,
     },
     {
@@ -183,7 +187,7 @@ export function Sessions() {
             columns={columns}
             dataSource={visible}
             pagination={{ pageSize: 20, hideOnSinglePage: true }}
-            scroll={{ x: 1000 }}
+            scroll={{ x: 1110 }}
           />
         )}
       </Card>

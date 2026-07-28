@@ -49,28 +49,43 @@ function Shell({
       <Layout.Header
         style={{
           background: 'transparent',
-          padding: '0 16px',
+          padding: '8px 16px',
           borderBottom: `1px solid ${dark ? '#33322e' : '#e6e5e0'}`,
+          // The bar has to grow rather than clip: at phone widths its contents
+          // wrap onto a second line, and a fixed 64px would push the live badge
+          // and the theme switch outside it.
+          height: 'auto',
+          lineHeight: 1.4,
         }}
       >
-        <Flex align="center" justify="space-between" style={{ height: '100%' }} gap={16}>
-          <Flex align="center" gap={12}>
-            <Typography.Title level={4} style={{ margin: 0 }}>
+        <Flex align="center" justify="space-between" gap={12} wrap>
+          <Flex align="center" gap={12} wrap>
+            <Typography.Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>
               tor-pool
             </Typography.Title>
             {pool && (
-              <Typography.Text type="secondary">
+              <Typography.Text type="secondary" style={{ whiteSpace: 'nowrap' }}>
                 SOCKS :{pool.socks_port}
                 {pool.http_port ? ` · HTTP :${pool.http_port}` : ''}
               </Typography.Text>
             )}
           </Flex>
-          <Flex align="center" gap={16}>
+          <Flex align="center" gap={16} wrap>
+            {/* nowrap throughout: these are short labels, and a version or a
+                status word broken across two lines reads as corruption. */}
             <Badge
               status={connected ? 'processing' : 'error'}
-              text={connected ? 'live' : 'reconnecting'}
+              text={
+                <span style={{ whiteSpace: 'nowrap' }}>
+                  {connected ? 'live' : 'reconnecting'}
+                </span>
+              }
             />
-            {pool && <Typography.Text type="secondary">{pool.version}</Typography.Text>}
+            {pool && (
+              <Typography.Text type="secondary" style={{ whiteSpace: 'nowrap' }}>
+                {pool.version}
+              </Typography.Text>
+            )}
             <Switch
               checked={dark}
               onChange={onToggleTheme}
@@ -93,8 +108,8 @@ function Shell({
         )}
 
         <Tabs
+          destroyOnHidden={false}
           defaultActiveKey="overview"
-          destroyInactiveTabPane={false}
           items={[
             { key: 'overview', label: 'Overview', children: <Overview dark={dark} /> },
             { key: 'instances', label: 'Instances', children: <Instances /> },

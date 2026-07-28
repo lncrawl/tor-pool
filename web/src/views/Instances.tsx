@@ -79,6 +79,11 @@ export function Instances() {
     {
       title: 'Exit',
       key: 'exit',
+      // Width is not optional: every other column here is fixed, so a column
+      // left to size itself gets whatever is left of scroll.x — about 30px once
+      // the viewport is narrower than the table, which stacks an IP one
+      // character per line.
+      width: 190,
       render: (_, r) => {
         if (r.exit_ip) {
           return (
@@ -226,6 +231,7 @@ export function Instances() {
       <Card
         size="small"
         title={`Instances (${pool?.routable ?? 0} routable of ${pool?.size ?? 0})`}
+        styles={{ title: { whiteSpace: 'normal' } }}
         extra={
           <Flex gap={8} align="center" wrap>
             <InputNumber
@@ -269,7 +275,7 @@ export function Instances() {
           columns={columns}
           dataSource={instances}
           pagination={false}
-          scroll={{ x: 1100 }}
+          scroll={{ x: 1260 }}
         />
       </Card>
     </>
