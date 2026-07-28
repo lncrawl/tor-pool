@@ -27,6 +27,10 @@ type InstanceConfig struct {
 	// default of 10 minutes would rotate it out from under a pinned session.
 	MaxCircuitDirtiness time.Duration
 
+	// ConfluxEnabled turns tor's multipath circuits on. Off here, unlike in tor
+	// itself: see Torrc for why an exit-stability-first pool cannot afford it.
+	ConfluxEnabled bool
+
 	// ExtraConfig is appended verbatim, for options this struct does not model.
 	ExtraConfig string
 }
@@ -85,6 +89,13 @@ func (ic InstanceConfig) Torrc() string {
 		fmt.Fprintf(&b, "MaxCircuitDirtiness %d\n", int(ic.MaxCircuitDirtiness.Seconds()))
 	}
 
+	// Conflux is on by default in current tor and multiplies how many exits one
+	// instance holds at once: each pre-built set has its own exit relay, and
+	// successive streams land on different sets — so a caller that never rotated
+	// still saw its exit IP change. Multipath throughput is worth less to this
+	// pool than one instance meaning one exit.
+	fmt.Fprintf(&b, "ConfluxEnabled %s\n", torBool(ic.ConfluxEnabled))
+
 	if ic.ExitNodes != "" {
 		fmt.Fprintf(&b, "ExitNodes %s\n", ic.ExitNodes)
 	}
@@ -103,4 +114,12 @@ func (ic InstanceConfig) Torrc() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// torBool renders a boolean the way torrc spells one.
+func torBool(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
 }

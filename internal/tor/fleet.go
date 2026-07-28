@@ -25,6 +25,7 @@ type FleetOptions struct {
 	ExcludeExitNodes    string
 	StrictNodes         bool
 	MaxCircuitDirtiness time.Duration
+	ConfluxEnabled      bool
 	ExtraTorConfig      string
 }
 
@@ -40,7 +41,6 @@ type Fleet struct {
 
 	mu        sync.RWMutex
 	instances map[int]*Instance
-	nextIndex int
 }
 
 // NewFleet creates an empty fleet. Call Start to bring instances up.
@@ -101,8 +101,7 @@ func (f *Fleet) Start(ctx context.Context) error {
 // be nil); a failed start sends -1.
 func (f *Fleet) Add(ctx context.Context, ready chan<- int) (*Instance, error) {
 	f.mu.Lock()
-	index := f.nextIndex
-	f.nextIndex++
+	index := f.freeIndexLocked()
 	cfg := InstanceConfig{
 		Index:               index,
 		DataDirectory:       filepath.Join(f.opts.DataDir, strconv.Itoa(index)),
@@ -112,6 +111,7 @@ func (f *Fleet) Add(ctx context.Context, ready chan<- int) (*Instance, error) {
 		ExcludeExitNodes:    f.opts.ExcludeExitNodes,
 		StrictNodes:         f.opts.StrictNodes,
 		MaxCircuitDirtiness: f.opts.MaxCircuitDirtiness,
+		ConfluxEnabled:      f.opts.ConfluxEnabled,
 		ExtraConfig:         f.opts.ExtraTorConfig,
 	}
 	inst := NewInstance(f.opts.Binary, cfg, f.log)
@@ -140,6 +140,22 @@ func (f *Fleet) Add(ctx context.Context, ready chan<- int) (*Instance, error) {
 	}()
 
 	return inst, nil
+}
+
+// freeIndexLocked returns the lowest index no instance currently holds. Callers
+// must hold the lock.
+//
+// Indexes are reused rather than handed out from an ever-growing counter. Each
+// one maps to a fixed pair of ports inside two blocks a fixed distance apart, so
+// a counter that only goes up eventually hands an instance a SOCKS port that is
+// another instance's control port — after enough resizes, a pool that had always
+// been within its configured bounds.
+func (f *Fleet) freeIndexLocked() int {
+	for index := 0; ; index++ {
+		if _, taken := f.instances[index]; !taken {
+			return index
+		}
+	}
 }
 
 // Remove stops an instance and drops it from the fleet.

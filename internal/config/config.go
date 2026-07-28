@@ -36,6 +36,10 @@ type Config struct {
 	DataDir          string
 	TorBinary        string
 
+	// BootstrapStallTimeout is how long an instance may make no bootstrap
+	// progress before it is restarted. Zero disables the check.
+	BootstrapStallTimeout time.Duration
+
 	// Listeners. A zero port disables that listener.
 	SocksPort int
 	HTTPPort  int
@@ -61,7 +65,12 @@ type Config struct {
 	ExcludeExitNodes    string
 	StrictNodes         bool
 	MaxCircuitDirtiness time.Duration
+	ConfluxEnabled      bool
 	ExtraTorConfig      string
+
+	// PinExitRelay locks each instance to a single exit relay, so one instance
+	// really is one exit IP.
+	PinExitRelay bool
 
 	// Observability
 	HistoryResolution time.Duration
@@ -78,6 +87,14 @@ func Defaults() Config {
 		MinReady:         1,
 		DataDir:          "/var/lib/tor",
 		TorBinary:        "tor",
+
+		// Long enough that a genuinely slow consensus fetch is not cut short,
+		// short enough that a stalled instance does not sit out of the pool for
+		// the rest of the day. Tor can wedge part-way through bootstrap with a
+		// live process, which nothing else notices: the supervisor sees a
+		// running tor and the failure ladder never hears from an instance that
+		// takes no traffic.
+		BootstrapStallTimeout: 3 * time.Minute,
 
 		SocksPort: 9250,
 		HTTPPort:  9251,
@@ -115,6 +132,18 @@ func Defaults() Config {
 		// observable identity, which is the point here but is the opposite of
 		// what a privacy-focused client would want.
 		MaxCircuitDirtiness: time.Hour,
+
+		// Off, unlike tor's own default. Each conflux set tor pre-builds has its
+		// own exit relay and successive streams land on different sets, so an
+		// instance served several exit IPs to a caller that never asked to
+		// rotate. Multipath throughput is not worth that here.
+		ConfluxEnabled: false,
+
+		// Off by default: pinning makes an instance depend on one relay, which
+		// is a real trade — a slow or selective exit then affects every request
+		// on that instance until the failure ladder moves it. Turn it on when a
+		// stable exit IP per instance matters more.
+		PinExitRelay: false,
 
 		HistoryResolution: time.Second,
 		HistoryWindow:     5 * time.Minute,
@@ -183,6 +212,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envInt(look, "MIN_READY", &c.MinReady))
 	collect(envString(look, "DATA_DIR", &c.DataDir))
 	collect(envString(look, "TOR_BINARY", &c.TorBinary))
+	collect(envDuration(look, "BOOTSTRAP_STALL_TIMEOUT", &c.BootstrapStallTimeout))
 
 	collect(envPort(look, "SOCKS_PORT", &c.SocksPort))
 	collect(envPort(look, "HTTP_PORT", &c.HTTPPort))
@@ -205,7 +235,9 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envString(look, "TOR_EXCLUDE_EXIT_NODES", &c.ExcludeExitNodes))
 	collect(envBool(look, "TOR_STRICT_NODES", &c.StrictNodes))
 	collect(envDuration(look, "TOR_MAX_CIRCUIT_DIRTINESS", &c.MaxCircuitDirtiness))
+	collect(envBool(look, "TOR_CONFLUX", &c.ConfluxEnabled))
 	collect(envString(look, "TOR_EXTRA_CONFIG", &c.ExtraTorConfig))
+	collect(envBool(look, "PIN_EXIT_RELAY", &c.PinExitRelay))
 
 	collect(envDuration(look, "HISTORY_RESOLUTION", &c.HistoryResolution))
 	collect(envDuration(look, "HISTORY_WINDOW", &c.HistoryWindow))
@@ -242,6 +274,9 @@ func (c *Config) Validate() error {
 	}
 	if c.SpawnStagger < 0 {
 		bad("SPAWN_STAGGER cannot be negative")
+	}
+	if c.BootstrapStallTimeout < 0 {
+		bad("BOOTSTRAP_STALL_TIMEOUT cannot be negative (0 disables the check)")
 	}
 	if c.DataDir == "" {
 		bad("DATA_DIR cannot be empty")

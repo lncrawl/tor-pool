@@ -25,6 +25,21 @@ func TestTorrcHoldsCircuitsForStickiness(t *testing.T) {
 	}
 }
 
+func TestTorrcDisablesConfluxByDefault(t *testing.T) {
+	// Each conflux set tor pre-builds has its own exit relay and successive
+	// streams land on different sets, so one instance served several exit IPs to
+	// a caller that never asked to rotate.
+	if rc := testInstance().Torrc(); !strings.Contains(rc, "ConfluxEnabled 0") {
+		t.Errorf("conflux not disabled:\n%s", rc)
+	}
+
+	ic := testInstance()
+	ic.ConfluxEnabled = true
+	if rc := ic.Torrc(); !strings.Contains(rc, "ConfluxEnabled 1") {
+		t.Errorf("conflux not re-enabled when asked:\n%s", rc)
+	}
+}
+
 func TestTorrcOmitsCircuitLifetimeWhenUnset(t *testing.T) {
 	ic := testInstance()
 	ic.MaxCircuitDirtiness = 0

@@ -73,6 +73,7 @@ func run() error {
 		ExcludeExitNodes:    cfg.ExcludeExitNodes,
 		StrictNodes:         cfg.StrictNodes,
 		MaxCircuitDirtiness: cfg.MaxCircuitDirtiness,
+		ConfluxEnabled:      cfg.ConfluxEnabled,
 		ExtraTorConfig:      cfg.ExtraTorConfig,
 	}, log)
 
