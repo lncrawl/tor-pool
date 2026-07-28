@@ -1,0 +1,97 @@
+name: Weekly rebuild
+
+# Tor arrives from Alpine at image build time, so without this it only reaches
+# users when a release happens to be cut. This rebuilds the two moving targets
+# against the current package set:
+#
+#   edge   — the tip of main
+#   latest — the newest release, together with the other tags that float to it
+#
+# The exact `X.Y.Z` of that release is deliberately left alone. It is the one tag
+# that promises the same bytes every time, and someone who pinned it chose
+# reproducibility over updates — `X.Y` is there for the other choice.
+#
+# Each target is smoke-tested before it is published. A rebuild is the one change
+# that reaches users with no human having looked at it, and the thing most likely
+# to break it is precisely the package it exists to update.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays, 02:00 UTC.
+    - cron: '0 2 * * 1'
+
+concurrency:
+  group: rebuild
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- edge
+  verify-edge:
+    uses: ./.github/workflows/verify-image.yml
+
+  edge:
+    needs: verify-edge
+    uses: ./.github/workflows/build-image.yml
+    permissions:
+      packages: write
+    with:
+      # `edge` only. The sha- tags name a specific commit's build and are used to
+      # bisect a regression, so republishing one with a different tor underneath
+      # would quietly destroy the only immutable record of that commit.
+      tag-spec: |
+        type=raw,value=edge
+      refresh-packages: true
+
+  # -------------------------------------------------------------- latest
+  target:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.parts.outputs.version }}
+      minor: ${{ steps.parts.outputs.minor }}
+      major: ${{ steps.parts.outputs.major }}
+      floating: ${{ steps.parts.outputs.floating }}
+      floating_major: ${{ steps.parts.outputs.floating_major }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the newest release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # gh's notion of the latest release already excludes drafts and
+          # prereleases, which is exactly what `latest` should track.
+          tag=$(gh release view --json tagName --jq .tagName)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Rebuilding release $tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Split the version
+        id: parts
+        run: ./.github/version-parts.sh '${{ steps.release.outputs.tag }}' >> "$GITHUB_OUTPUT"
+
+  verify-latest:
+    needs: target
+    uses: ./.github/workflows/verify-image.yml
+    with:
+      ref: ${{ needs.target.outputs.tag }}
+
+  latest:
+    needs: [target, verify-latest]
+    uses: ./.github/workflows/build-image.yml
+    permissions:
+      packages: write
+    with:
+      # Every tag that floats to this release, and not the exact version.
+      tag-spec: |
+        type=raw,value=latest,enable=${{ needs.target.outputs.floating == 'true' }}
+        type=raw,value=${{ needs.target.outputs.minor }},enable=${{ needs.target.outputs.floating == 'true' }}
+        type=raw,value=${{ needs.target.outputs.major }},enable=${{ needs.target.outputs.floating_major == 'true' }}
+      # The code really is that release, so it says so. What changed is the tor
+      # underneath, which the image's created label and its digest record.
+      version: ${{ needs.target.outputs.version }}
+      ref: ${{ needs.target.outputs.tag }}
+      refresh-packages: true

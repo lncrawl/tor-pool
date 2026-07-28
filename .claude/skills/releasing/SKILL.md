@@ -15,11 +15,19 @@ was the image most people pulled.
 | --- | --- | --- | --- |
 | `publish-edge.yml` | push to `main` touching code | `edge`, `sha-<short>` | `edge-<short sha>` |
 | `release.yml` | `v*` tag, or dispatch with a version | `X.Y.Z`, `X.Y`, `X`, `latest` | `X.Y.Z` |
-| `build-image.yml` | called by both | — | — |
+| `rebuild.yml` | Mondays 02:00 UTC, or dispatch | `edge`; `latest`, `X.Y`, `X` | unchanged |
+| `build-image.yml` | called by all three | — | — |
+| `verify-image.yml` | called by CI and the rebuild | — | — |
 
 `build-image.yml` is a `workflow_call` reusable workflow holding *how* the image is built
-(QEMU, buildx, platforms, cache, GHCR login). The callers decide only what it is called and
-what version it stamps. Change build options there, once.
+(QEMU, buildx, platforms, cache, GHCR login). The callers decide only what it is called,
+what version it stamps, which ref it builds and whether to re-resolve OS packages. Change
+build options there, once.
+
+`verify-image.yml` builds for the host architecture and boots a single-instance pool. CI
+runs it on every push and PR; the rebuild runs it on each target before publishing.
+`.github/version-parts.sh` decides which tags float, so the release and the rebuild cannot
+disagree about it.
 
 ## Cutting a release
 
@@ -65,14 +73,40 @@ the failure this avoids — and it is marked as a prerelease on GitHub.
 The bare major tag is suppressed while it is `0`. Before 1.0 semver puts breaking changes on
 the minor, so a `0` tag would carry someone from 0.1.x straight into an incompatible 0.2.x.
 
+## The weekly rebuild
+
+`tor` is installed from Alpine at image build time, so without a rebuild it only reaches
+users when a release happens to be cut. `rebuild.yml` refreshes the two moving targets every
+Monday: `edge` from the tip of `main`, and `latest` from the newest release — along with
+`X.Y` and `X`, which float to that same release and would otherwise end up staler than
+`latest` for identical code.
+
+**The exact `X.Y.Z` is never rebuilt.** It is the one tag that promises the same bytes every
+time, and someone who pinned it chose reproducibility over updates. `X.Y` exists for the
+other choice.
+
+Three things this gets right that are easy to miss:
+
+- **The `apk` layer has to be invalidated explicitly.** It is a cache hit on its instruction
+  alone, so with `cache-from: type=gha` warm, a rebuild reuses the old layer and ships the
+  *old* tor — the earlier cron did exactly that and achieved nothing. Hence the named
+  `runtime` stage and `refresh-packages: true`, which sets `pull` and
+  `no-cache-filters: runtime`. The node and go stages stay cached.
+- **Each target is smoke-tested before it is published.** A rebuild is the one change that
+  reaches users with nobody having looked at it, and the most likely thing to break it is
+  the package it exists to update. Both targets go through `verify-image.yml` first.
+- **`sha-<short>` is not republished.** Those name a specific commit's build and are what a
+  regression is bisected against; giving one a different tor would destroy the only
+  immutable record of that commit.
+
+The rebuilt image still reports the release's own version — the code *is* that release. What
+changed is underneath it, recorded in the image's `org.opencontainers.image.created` label
+and its digest. A rebuild therefore produces a new digest even when no package changed, so
+pin `X.Y.Z` or a digest if byte-stability matters. A failed scheduled run notifies whoever
+last touched the workflow file; if `latest` looks stale, check `rebuild.yml`'s history first.
+
 ## What is deliberately not automated
 
-- **No scheduled rebuild.** There was a weekly cron so a new Alpine `tor` reached users
-  without a code change, but it republished `latest` from tip-of-`main`, which shipped
-  unreleased work on a timer. It is gone. The consequence is real and worth knowing: `apk
-  add tor` resolves at build time, so **a new `tor` reaches users only when a release is
-  cut**. If a `tor` security release matters, cut a patch release for it — the changelog
-  entry is the announcement.
 - **No conventional-commit tooling** (release-please, semantic-release). Both need commit
   prefixes this repo does not use, and both would take over the hand-curated changelog.
 - **No second registry.** GHCR only; another one means another credential to rotate for no
@@ -80,8 +114,8 @@ the minor, so a `0` tag would carry someone from 0.1.x straight into an incompat
 
 ## Docs that must not drift
 
-`latest` means *newest release*. Anything telling a reader that `latest` follows `main`, or
-that images are rebuilt weekly, is now wrong — check `README.md`, `docs/operations.md` and
+`latest` means *newest release*, refreshed weekly against the current `tor`. Anything telling
+a reader that `latest` follows `main` is wrong — check `README.md`, `docs/operations.md` and
 `AGENTS.md` when you change this pipeline.
 
 ## First publish of a new package
@@ -107,3 +141,8 @@ appears on the repo page.
   build` ran and that vite's `outDir` still points into `internal/server/dist`.
 - **Nothing ran on a push to `main`** — `publish-edge.yml` ignores markdown, `docs/`,
   `.claude/` and `LICENSE`. A push touching only those is meant to publish nothing.
+- **The rebuild published the same tor as last week** — check that the `runtime` stage is
+  still named in `docker/Dockerfile` and that `refresh-packages: true` is still passed. Both
+  are load-bearing and neither fails loudly.
+- **The rebuild cannot find a release** — `gh release view` needs one non-draft,
+  non-prerelease release to exist. Before the first one, only the `edge` half can run.

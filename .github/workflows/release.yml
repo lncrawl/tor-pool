@@ -28,6 +28,8 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
       major: ${{ steps.parse.outputs.major }}
       minor: ${{ steps.parse.outputs.minor }}
+      floating: ${{ steps.parse.outputs.floating }}
+      floating_major: ${{ steps.parse.outputs.floating_major }}
       prerelease: ${{ steps.parse.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
@@ -40,33 +42,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-
-          if [ -n "$INPUT_VERSION" ]; then
-            version="${INPUT_VERSION#v}"
-          else
-            version="${REF_NAME#v}"
-          fi
-
-          # Semver, with an optional prerelease suffix. Anything else would
-          # produce image tags nobody can reason about.
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::'$version' is not a semantic version (want 0.2.0 or 0.2.0-rc.1)"
-            exit 1
-          fi
-
-          major="${version%%.*}"
-          rest="${version#*.}"
-          minor="$major.${rest%%.*}"
-
-          prerelease=false
-          case "$version" in *-*) prerelease=true ;; esac
-
-          {
-            echo "version=$version"
-            echo "major=$major"
-            echo "minor=$minor"
-            echo "prerelease=$prerelease"
-          } >> "$GITHUB_OUTPUT"
+          ./.github/version-parts.sh "${INPUT_VERSION:-$REF_NAME}" >> "$GITHUB_OUTPUT"
 
       # Before the ten minute build, not after: a version with nothing written
       # about it should fail in seconds.
@@ -91,9 +67,9 @@ jobs:
       # 0.1.x straight into an incompatible 0.2.x.
       tag-spec: |
         type=raw,value=${{ needs.prepare.outputs.version }}
-        type=raw,value=${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
-        type=raw,value=${{ needs.prepare.outputs.major }},enable=${{ needs.prepare.outputs.prerelease == 'false' && needs.prepare.outputs.major != '0' }}
-        type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+        type=raw,value=${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.floating == 'true' }}
+        type=raw,value=${{ needs.prepare.outputs.major }},enable=${{ needs.prepare.outputs.floating_major == 'true' }}
+        type=raw,value=latest,enable=${{ needs.prepare.outputs.floating == 'true' }}
       version: ${{ needs.prepare.outputs.version }}
 
   publish:

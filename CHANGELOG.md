@@ -9,6 +9,14 @@ means.
 
 ## [Unreleased]
 
+### Added
+
+- **Weekly rebuild of the moving image tags** against the current Alpine `tor`, so a Tor
+  security release reaches users without waiting for a tor-pool release. It refreshes
+  `edge`, `latest`, `X.Y` and `X`, never the exact `X.Y.Z` — that one promises the same
+  bytes every time. Each target has to boot a pool and bootstrap a circuit before it is
+  published.
+
 ## [0.1.0] - 2026-07-28
 
 The first release with notes. The earlier `v0.0.x` tags were created automatically by

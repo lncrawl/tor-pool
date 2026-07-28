@@ -73,13 +73,18 @@ Which tag you pull decides what you get:
 
 | Tag | Moves when | Suits |
 | --- | --- | --- |
-| `latest` | a release is cut | most deployments; what `compose.yml` uses |
-| `X.Y` | a patch release in that line | pinning a minor version, still taking fixes |
+| `latest` | a release is cut, and weekly for a newer Tor | most deployments; what `compose.yml` uses |
+| `X.Y` | a patch release in that line, and weekly | pinning a minor version, still taking fixes |
 | `X.Y.Z` | never | reproducible deployments — you upgrade on purpose |
-| `edge` | every code push to `main` | trying unreleased work |
+| `edge` | every code push to `main`, and weekly | trying unreleased work |
 
-Tor itself is installed at image build time, so **a new `tor` release reaches you when you
-pull a newer image**, not on a schedule. Watch the releases if that matters to you.
+Tor is installed at image build time, so the version you run is fixed when the image is
+built. The moving tags above are rebuilt every Monday against the current Alpine `tor`, which
+is how a Tor security release reaches you without waiting for a tor-pool release. Each rebuild
+is smoke-tested — the image has to boot a pool and bootstrap a circuit before it is published.
+
+`X.Y.Z` is deliberately excluded: it promises the same bytes every time. If you pin it, you
+also own upgrading it. Use `X.Y` if you would rather have the fixes.
 
 ## What monitoring to wire up
 

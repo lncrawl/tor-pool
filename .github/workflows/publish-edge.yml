@@ -21,19 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      stamp: ${{ steps.stamp.outputs.stamp }}
-    steps:
-      # Deliberately not a bare version number: anyone reading this off
-      # /api/pool or the dashboard header should be able to tell at a glance
-      # that they are not running a release.
-      - id: stamp
-        run: echo "stamp=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
   edge:
-    needs: version
     uses: ./.github/workflows/build-image.yml
     permissions:
       packages: write
@@ -41,4 +29,3 @@ jobs:
       tag-spec: |
         type=raw,value=edge
         type=sha,prefix=sha-,format=short
-      version: ${{ needs.version.outputs.stamp }}

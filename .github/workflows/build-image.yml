@@ -12,9 +12,24 @@ on:
         required: true
         type: string
       version:
-        description: Stamped into main.version, which the API and dashboard report.
-        required: true
+        description: >
+          Stamped into main.version, which the API and dashboard report. Omit for a
+          non-release build and it becomes edge-<short sha>.
+        required: false
         type: string
+        default: ''
+      ref:
+        description: Ref to build. Defaults to whatever started the calling workflow.
+        required: false
+        type: string
+        default: ''
+      refresh-packages:
+        description: >
+          Re-resolve the runtime stage's OS packages instead of reusing the cached
+          layer. What the scheduled rebuild exists for.
+        required: false
+        type: boolean
+        default: false
 
 env:
   IMAGE: ghcr.io/lncrawl/tor-pool
@@ -27,6 +42,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Empty means the default, which is the ref that started the caller.
+          ref: ${{ inputs.ref }}
+
+      # Deliberately not a bare version number when none was given: anyone
+      # reading this off /api/pool or the dashboard header should be able to tell
+      # at a glance that they are not running a release.
+      - name: Resolve the version stamp
+        id: stamp
+        env:
+          GIVEN: ${{ inputs.version }}
+        run: |
+          set -eu
+          echo "version=${GIVEN:-edge-$(git rev-parse --short HEAD)}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -66,9 +95,15 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ inputs.version }}
+            VERSION=${{ steps.stamp.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # The runtime stage installs tor from Alpine at build time, and its
+          # layer is a cache hit on the instruction alone — so picking up a new
+          # tor means invalidating that one stage, and re-pulling the base image
+          # it sits on. The expensive node and go stages stay cached.
+          pull: ${{ inputs.refresh-packages }}
+          no-cache-filters: ${{ inputs.refresh-packages && 'runtime' || '' }}
 
       - name: Summarise
         run: |
@@ -79,5 +114,5 @@ jobs:
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo
-            echo "Reports itself as \`${{ inputs.version }}\`."
+            echo "Reports itself as \`${{ steps.stamp.outputs.version }}\`."
           } >> "$GITHUB_STEP_SUMMARY"

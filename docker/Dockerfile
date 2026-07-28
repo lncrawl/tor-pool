@@ -59,8 +59,13 @@ RUN --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETOS}-${TA
 # Runtime: Alpine's community tor, which tracks the latest release. The package
 # already ships the GeoIP databases at /usr/share/tor, which is what makes
 # exit-node country lookups work over the control port.
+#
+# Named so the scheduled rebuild can invalidate this stage alone
+# (`no-cache-filters: runtime`). Without that the `apk add` below is a cache hit
+# on its instruction and tor is never re-resolved — a rebuild whose entire
+# purpose is picking up a new tor would ship the old one.
 # ---------------------------------------------------------------------------
-FROM alpine:latest
+FROM alpine:latest AS runtime
 
 LABEL org.opencontainers.image.title="tor-pool" \
     org.opencontainers.image.description="Pool of Tor SOCKS5/HTTP proxies behind one sticky endpoint, with failure-driven circuit remediation and a live management dashboard." \

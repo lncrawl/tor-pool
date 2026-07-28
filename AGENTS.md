@@ -162,5 +162,6 @@ The globally available `dataviz` skill applies to any chart work in `web/`.
 **Publishing an image and cutting a release are separate events.** A push to `main`
 publishes `ghcr.io/lncrawl/tor-pool:edge`; a release is a `vX.Y.Z` tag (or a
 `release.yml` dispatch) and is the only thing that moves `latest`. The version lives in
-`CHANGELOG.md` and nowhere else — the release refuses to run without a section for it.
-GHCR is the only registry. See the `releasing` skill.
+`CHANGELOG.md` and nowhere else — the release refuses to run without a section for it. A
+weekly rebuild refreshes the moving tags against the current Alpine `tor`, never the exact
+`X.Y.Z`. GHCR is the only registry. See the `releasing` skill.
