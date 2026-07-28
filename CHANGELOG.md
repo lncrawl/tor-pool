@@ -9,13 +9,83 @@ means.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-29
+
+Authentication. **Every existing caller breaks until it presents a credential** — see
+the migration note below.
+
+### Breaking
+
+- **The proxy password is now a credential.** The SOCKS5 username is still the session
+  key, but the password — previously read and discarded — must be a token. A caller
+  offering no credentials is refused during the SOCKS5 handshake, and the HTTP proxy
+  answers `407` with a `Proxy-Authenticate` challenge.
+
+  ```
+  before   socks5h://my-session:x@host:9250
+  after    socks5h://my-session:tp_7Kq2mXvR8nB4jL6wYtZaPc@host:9250
+  ```
+
+- **The REST API and dashboard require a credential.** `GET /health`, `GET /metrics`,
+  `POST /api/auth/login` and the dashboard's static assets stay public; everything else
+  under `/api/` answers `401`. An unmatched `/api/` path is authenticated before it
+  `404`s, so the surface no longer reports which endpoints exist.
+
+No released `lncrawl-scraper` is affected: its tor-pool support is still unreleased and
+carries a `token` field from the start.
+
+**Migrating.** On the first boot after upgrading, a dashboard password and a
+`proxy`-scoped token are generated and printed once to the container log. Take the token
+and use it as the password in every proxy URL. To provision them from config instead,
+set `ADMIN_PASSWORD` and `PROXY_TOKEN`. Both live in `DATA_DIR`, so mount the volume or
+they are regenerated on every recreate.
+
 ### Added
 
+- **Issued tokens.** Mint, name, scope and revoke credentials from the dashboard's new
+  Tokens tab. Only a digest is stored, so a secret is shown exactly once. Revoking takes
+  effect immediately — before the change reaches disk, so it cannot be undone by a
+  restart.
+- **Two scopes.** `proxy` covers traffic plus the session routes a caller uses to manage
+  its own sessions; `admin` covers everything. Give a scraper `proxy`: under `admin` the
+  credential in its config could also resize the pool and read every session key.
+- **A sign-in screen**, and `ADMIN_USER`/`ADMIN_PASSWORD` to configure the operator
+  login. Changing either invalidates every outstanding session immediately, which is the
+  answer to a credential exposure — there is no separate "sign out everywhere".
+- **`PROXY_TOKEN`**, a proxy credential fixed by configuration for deployments
+  provisioned from files rather than by hand. Verified like any token but never
+  persisted, so the environment stays authoritative.
+- **`LOGIN_TTL` and `LOGIN_RATE_LIMIT`.** Repeated wrong passwords from one address are
+  refused with `429`; a wrong username and a wrong password are answered identically.
+- **`auth` events** in the audit log for sign-ins and for tokens issued or revoked.
+  Refused *proxy* credentials are logged to stderr instead: the event ring is bounded, so
+  one entry per rejected connection would let anyone flush the audit history in seconds.
 - **Weekly rebuild of the moving image tags** against the current Alpine `tor`, so a Tor
   security release reaches users without waiting for a tor-pool release. It refreshes
   `edge`, `latest`, `X.Y` and `X`, never the exact `X.Y.Z` — that one promises the same
   bytes every time. Each target has to boot a pool and bootstrap a circuit before it is
   published.
+
+### Fixed
+
+- **A destination Tor was never going to reach no longer quarantines the instance.** Tor
+  refuses a private or loopback address, and that refusal was scored against the
+  instance — three requests for `127.0.0.1` were enough to quarantine a healthy one, and
+  enough of them emptied the pool. The request is still counted as failed; only the
+  remediation ladder is spared. Hostnames are unaffected, since a name that will not
+  resolve genuinely can mean a broken circuit.
+- **The SOCKS5 handshake has a read deadline.** A client that connected and sent one byte
+  held a goroutine and a file descriptor indefinitely.
+- **The HTTP proxy authenticates every request on a keep-alive connection**, not just the
+  first, so a later request cannot ride on an earlier one's credential.
+
+### Changed
+
+- `DEFAULT_SESSION` now decides what happens when an *authenticated* caller names no
+  session, rather than when a caller sends no credentials.
+- A session key is still not a tenancy boundary: any valid token may claim any key, so
+  sessions separate exit identities rather than callers. Now documented rather than
+  implied.
 
 ## [0.1.0] - 2026-07-28
 
@@ -116,5 +186,6 @@ them was ever accompanied by an entry here — this release is also where that s
 - Fixed data races on an instance's process handle during a restart, and on the NEWNYM
   cooldown timestamp.
 
-[unreleased]: https://github.com/lncrawl/tor-pool/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.2.0
 [0.1.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.1.0
