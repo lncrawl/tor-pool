@@ -41,6 +41,13 @@ means.
   report count no longer says how close an instance is to quarantine; the score does.
   Instances' failures column shows the breakdown on hover.
 
+### Changed
+
+- **The dashboard is built on React 19, AntD 6, recharts 3, Vite 8 and TypeScript 7.**
+  No behaviour or layout changes — every dependency was on a major behind, and staying
+  there was going to make the eventual jump land all at once. Nothing in the dashboard
+  source needed changing for it.
+
 ## [0.2.0] - 2026-07-29
 
 Authentication. **Every existing caller breaks until it presents a credential** — see
