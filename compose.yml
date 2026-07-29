@@ -9,11 +9,15 @@ services:
     restart: unless-stopped
 
     environment:
-      # The dashboard login. Left empty, a password is generated on first boot and
-      # printed once to this container's log; it survives restarts because the
-      # tor_data volume does. A password set here is never written to disk.
+      # The dashboard login, admin / admin unless you set one — convenient for a
+      # pool on your own machine, which is what this file publishes by default.
+      #
+      # Change it before you widen API_PUBLISH below. Set it to nothing at all
+      # (ADMIN_PASSWORD=) and the first boot generates one instead and prints it
+      # once to this container's log, which is the safe default for a host that
+      # is reachable from anywhere. A password set here is never written to disk.
       ADMIN_USER: '${ADMIN_USER:-admin}'
-      ADMIN_PASSWORD: '${ADMIN_PASSWORD:-}'
+      ADMIN_PASSWORD: '${ADMIN_PASSWORD:-admin}'
 
       # A fixed proxy credential, for provisioning from files instead of the
       # dashboard. Must start with tp_. Empty means the first boot issues one and

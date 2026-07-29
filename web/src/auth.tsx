@@ -132,6 +132,7 @@ function SignIn({
             <Form.Item
               name="password"
               label="Password"
+              initialValue="admin"
               rules={[{ required: true, message: 'Required' }]}
             >
               <Input.Password autoComplete="current-password" />
