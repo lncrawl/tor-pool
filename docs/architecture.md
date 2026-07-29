@@ -14,6 +14,7 @@ torpool (PID 1)
 | Package | Responsibility |
 | --- | --- |
 | `internal/config` | Environment parsing, defaults, validation |
+| `internal/auth` | The credential store, JWTs, tokens, scopes |
 | `internal/tor` | torrc rendering, the control-port client, process supervision |
 | `internal/pool` | Session pinning, instance selection, health, remediation |
 | `internal/proxy` | The two client-facing listeners and the byte relay |
@@ -35,6 +36,12 @@ short is what produces a corrupt `DataDirectory` on the next start.
 A session key is the SOCKS5 username, or the `Proxy-Authorization` user over HTTP. The
 *password* is the credential — see [api.md](api.md#authentication) — and a caller that
 authenticates without naming a session gets its key from `DEFAULT_SESSION`.
+
+The two halves are independent, which is what makes `AUTH_DISABLED` a change to
+authentication only. With it set the password is ignored, but the username is still read:
+the listeners keep preferring username/password over SOCKS5's "no authentication" whenever
+a client offers both, precisely so a caller does not silently lose its stickiness along with
+its credential.
 
 The key is still an **identity hint, not a boundary**. Authentication decides who may use
 the pool at all; it does not partition it. Any valid token may claim any key, and many

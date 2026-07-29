@@ -7,9 +7,68 @@ All notable changes are documented here. The format is based on
 `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag
 means.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-30
+
+### Added
+
+- **`AUTH_DISABLED=true` turns off every credential check.** The SOCKS5 listener accepts a
+  client offering no authentication method, the HTTP listener stops answering `407`, and the
+  API answers without a bearer token — so a plain `socks5h://127.0.0.1:9250` works and the
+  dashboard opens straight to the pool instead of a sign-in screen. For a pool on the machine
+  you are working on, where minting a token to talk to your own container is friction that
+  buys nothing.
+
+  A caller that still sends a credential is unaffected. The password is ignored, and the
+  username beside it is still read as the session key — dropping that would collapse every
+  caller onto `DEFAULT_SESSION` and one exit IP, which reads as a routing bug rather than as
+  a consequence of a flag.
+
+  **Only ever set this where nothing else can reach the ports.** There is no partial version:
+  whoever can open a socket gets your Tor bandwidth, the session table, and the ability to
+  restart instances, and unlike a weak password there is nothing left to guess. It is not
+  validated against `BIND_HOST`, which would look like the obvious safety check and would be
+  the wrong one — inside a container the bind has to be `0.0.0.0` for a port mapping to reach
+  it, so the process cannot see whether it is exposed and would refuse the one setup the flag
+  is for. Startup prints a banner block instead, and the dashboard shows an `auth disabled`
+  tag where the sign-out control normally is. The Tokens tab is hidden, since nothing would
+  check what it issued — the tokens themselves are still stored and start working the moment
+  the flag goes.
+
+  Credentials are still generated, logged and stored on first boot while the flag is set, so
+  removing it is a restart rather than a second round of setup.
+
+- **`GET /api/auth/status`** — public, and reports `{"required":bool,"user":"…"}`. The
+  dashboard reads it to decide whether to render a sign-in screen at all; a script can use it
+  to tell a deliberately open pool from one whose credential it has got wrong. It reveals
+  nothing that any other request does not already answer as a `401` or a `200`.
 
 ### Changed
+
+- **`compose.yml` now sets `AUTH_DISABLED=true` by default.** It publishes every port to
+  `127.0.0.1`, so the only caller is the machine running it. `AUTH_DISABLED=false` in your
+  `.env` restores checking, and you should set it in the same breath as widening any
+  `*_PUBLISH` line. The `docker run` quickstart in the README is unchanged and still
+  authenticates, because a command line gets copied onto servers.
+
+  **Read this before upgrading if you deploy from a checkout of this repo.** Pulling this
+  release and restarting turns authentication off on a pool that had it on — and if you had
+  already widened `API_PUBLISH` or the proxy publishes in your `.env`, that pool becomes
+  reachable and unauthenticated in the same step. Set `AUTH_DISABLED=false` in your `.env`
+  before you restart, and it stays off permanently. Deployments that keep their own compose
+  file or use `docker run` are unaffected: the default lives in the repo's `compose.yml`, not
+  in the image, whose own default remains `false`.
+
+- **Generated tokens and token ids are alphanumeric** — `tp_` plus 22 characters of base62
+  instead of base64url. Same length, same just-over-128 bits, no `-` or `_`. Those two
+  characters are legal in URL userinfo, so the old form was not wrong on the wire; it was
+  wrong everywhere else a token travels. They are what lets a token word-broken by a
+  terminal, or half-selected by a double-click, come back subtly different — and the failure
+  then presents as a refused credential with no hint that the string was mangled rather than
+  wrong at the source. The draw uses rejection sampling, not `% 62`, which would have made
+  the first eight characters of the alphabet about 1.6% likelier.
+
+  Tokens issued before this keep working: only the prefix is checked on the way in, and what
+  is stored is a digest. Nothing to migrate.
 
 - **`DELETE /api/sessions/{key}` moves from the `admin` scope to `proxy`**, so a client
   can release the session it created. Under `admin` no client ever could: a scraper
@@ -66,6 +125,16 @@ means.
   No behaviour or layout changes — every dependency was on a major behind, and staying
   there was going to make the eventual jump land all at once. Nothing in the dashboard
   source needed changing for it.
+
+### Fixed
+
+- **The dashboard stopped polling the session list once you left the Sessions tab.** Opening
+  it started a 3-second `GET /api/sessions` loop that then ran for the life of the page,
+  because the tab strip keeps hidden panes mounted so their sort and filter state survives a
+  switch. A dashboard left open on Overview was still asking for the full session table every
+  three seconds — on a busy pool, the most expensive read there is. The pane is now told when
+  it is off screen, and re-fetches immediately on the way back rather than showing what was
+  left from the last visit.
 
 ## [0.2.0] - 2026-07-29
 

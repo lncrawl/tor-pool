@@ -10,7 +10,11 @@ cleartext.
 ## Authentication
 
 Everything under `/api/` requires a credential. `GET /health`, `GET /metrics`,
-`POST /api/auth/login` and the dashboard's static assets do not.
+`POST /api/auth/login`, `GET /api/auth/status` and the dashboard's static assets do not.
+
+Unless the pool runs with `AUTH_DISABLED`, in which case nothing does — see
+[configuration.md](configuration.md#authentication). `GET /api/auth/status` is how a client
+finds out.
 
 Two kinds of credential, both sent as `Authorization: Bearer …`:
 
@@ -34,6 +38,21 @@ A token carries one:
 Give a scraper `proxy`. Under `admin` the credential in its config could also resize
 the pool, restart instances and read every session key.
 
+### `GET /api/auth/status`
+
+```bash
+curl localhost:8080/api/auth/status
+# {"required":true,"user":"admin"}
+```
+
+Public, and the only endpoint that is useful without a credential. `required` is `false`
+when the pool runs with `AUTH_DISABLED`; the dashboard reads it to decide whether to render
+a sign-in screen, and a script can use it to tell a deliberately open pool from one whose
+credential it has got wrong. `user` is the name `POST /api/auth/login` expects, which is
+half of a credential whose other half is the point.
+
+It reveals nothing: the same answer falls out of any other request, as a `401` or a `200`.
+
 ### `POST /api/auth/login`
 
 ```bash
@@ -52,6 +71,10 @@ one address are refused with `429` and a `Retry-After`.
 Signing out is a client-side act: a session is valid until `expires`, so there is
 nothing to revoke. Changing `ADMIN_USER` or `ADMIN_PASSWORD` invalidates every
 outstanding session immediately.
+
+Under `AUTH_DISABLED` this succeeds whatever is posted and is not rate limited. There is no
+secret to guess, and a pool advertising that it needs no credential must not answer `401`
+to a script that signs in before it works.
 
 ### `POST /api/auth/ticket`
 
@@ -79,6 +102,12 @@ curl -XPOST localhost:8080/api/tokens \
 
 `secret` appears in that one response and nowhere else: only its digest is stored, so a
 lost token means minting another. Listing never returns it.
+
+A secret is `tp_` plus 22 alphanumeric characters — just over 128 random bits, and
+deliberately nothing but letters and digits. It needs no quoting or percent-encoding
+anywhere it travels, and it survives being word-wrapped by a terminal or double-clicked
+out of a log without coming back subtly different. Older tokens containing `-` or `_` keep
+working — only the prefix is checked on the way in — so only newly minted ones change shape.
 
 `DELETE` answers `204`, and the token stops working immediately — before the change
 reaches disk, so a revoke cannot be undone by a restart. A token from `PROXY_TOKEN` is
@@ -312,4 +341,5 @@ and deliberately carries no challenge — there is nothing to retry with, so a c
 signs out on a `401` must not do so on a `403`.
 
 An unmatched `/api/` path is authenticated first and only then `404`s, so the surface
-does not report which endpoints exist. It never falls through to the dashboard.
+does not report which endpoints exist. It never falls through to the dashboard. Under
+`AUTH_DISABLED` there is nothing left to authenticate, so it `404`s directly.

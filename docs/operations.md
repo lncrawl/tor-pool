@@ -106,6 +106,21 @@ corrupt. That is deliberately fatal: starting over would silently mint new crede
 and lock out every consumer while `/health` kept answering 200. Move the file aside to
 start fresh, which discards every issued token, or restore it from a backup.
 
+**Anything can connect without a credential.** `AUTH_DISABLED` is set. Confirm it:
+
+```bash
+curl -s localhost:8080/api/auth/status     # {"required":false,...}
+```
+
+Unset the variable and restart. Nothing else has to be done: the password and token
+printed at first boot were still generated and stored while the flag was set, so they start
+being enforced immediately — `grep -A12 'generated credentials'` in the log as above. If
+that log is gone, set `ADMIN_PASSWORD` and `PROXY_TOKEN` and restart instead.
+
+While it is set, startup prints a banner block naming the flag and the dashboard shows an
+`auth disabled` tag where the sign-out control usually is. Both exist because the failure
+mode is nobody remembering it was ever set.
+
 ## Upgrading
 
 ```bash

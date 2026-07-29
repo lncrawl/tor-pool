@@ -30,6 +30,30 @@ poisoned cached consensus is the usual cause. Set it to `0` to disable the check
 
 ## Authentication
 
+`AUTH_DISABLED=true` switches off every credential check at once. The SOCKS5 listener
+accepts a client that offers no authentication method, the HTTP listener stops answering
+`407`, and the API answers without a bearer token — so `socks5h://127.0.0.1:9250` works
+with no userinfo at all and the dashboard opens straight to the pool instead of a sign-in
+screen. A caller that still sends a credential is unaffected: the password is ignored, and
+the username beside it is still read as the session key, so an existing scraper keeps its
+stickiness without being reconfigured.
+
+It exists for a pool on the machine you are working on, where provisioning a token to talk
+to your own container buys nothing. Do not set it on anything another machine can reach.
+There is no partial version of this: whoever can open a socket gets your Tor bandwidth, the
+session table, and the ability to restart instances, and unlike a weak password there is
+nothing left for them to guess. Note that the question is decided by how the **host**
+publishes the ports, not by `BIND_HOST` — inside a container the bind has to be `0.0.0.0`
+for a port mapping to reach it at all, so the process cannot tell you whether you are
+exposed. It is not validated for that reason.
+
+Credentials are still generated, logged and stored on first boot while the flag is set, so
+removing it is a restart rather than a second round of setup — the password and bootstrap
+token printed at that first boot are the ones that will work. Startup prints a banner
+saying checking is off, and the dashboard header shows an `auth disabled` tag in place of the
+sign-out control. The Tokens tab is hidden, since nothing would check what it issued — the
+tokens themselves are still stored and start working the moment the flag goes.
+
 `ADMIN_USER` and `ADMIN_PASSWORD` are the dashboard login. Leaving the password unset is
 a real option rather than an insecure one: the first boot generates a 128-bit password,
 prints it once, and stores only its digest — which is safe precisely because a random

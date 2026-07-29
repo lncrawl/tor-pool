@@ -32,7 +32,9 @@ service.
 - **Live dashboard** — see every instance's exit IP, state and traffic; rotate, drain,
   quarantine, restart, and resize the pool while it runs.
 - **Closed by default** — the proxy password is a revocable token, the dashboard and API
-  need a credential, and first boot generates both.
+  need a credential, and first boot generates both. `AUTH_DISABLED=true` turns all of it
+  off for a pool only your own machine can reach; the compose file sets it, a bare
+  `docker run` does not.
 - **One binary, no dependencies** — Go standard library only, dashboard embedded,
   ~40 MB image.
 
@@ -58,7 +60,11 @@ there, and without it every recreate mints new ones. Set `ADMIN_PASSWORD` and
 `PROXY_TOKEN` yourself if you would rather provision them from config.
 
 Or with compose — copy [`.env.example`](.env.example) to `.env` and run
-`docker compose up -d`.
+`docker compose up -d`. Note that [`compose.yml`](compose.yml) publishes every port to
+`127.0.0.1` and sets `AUTH_DISABLED=true` to match: no token on the proxy URL, no sign-in
+on the dashboard. Set `AUTH_DISABLED=false` in the same breath as widening any
+`*_PUBLISH`. The `docker run` above leaves authentication on, because a command line gets
+copied onto servers.
 
 `:latest` is the newest [release](https://github.com/lncrawl/tor-pool/releases). Pin
 `:X.Y.Z` for a deployment you want to be reproducible, or use `:edge` to run the tip of
@@ -172,6 +178,7 @@ Everything is an environment variable. The common ones:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `AUTH_DISABLED` | `false` | Accept every proxy connection and API request with no credential. Only for a pool nothing else can reach. The compose file sets it. |
 | `ADMIN_PASSWORD` | generated | Dashboard login. Generated and logged on first boot if unset. |
 | `PROXY_TOKEN` | — | A fixed proxy credential, instead of minting one in the dashboard. |
 | `POOL_SIZE` | 5 | Tor instances to run. ~30–40 MB each. |
@@ -256,6 +263,12 @@ Full reference with examples: [docs/api.md](docs/api.md).
 - **There is no TLS.** The dashboard password, every token and every session credential
   cross the wire in cleartext. Authentication is defence in depth, not a replacement for
   keeping these ports on loopback or behind something that terminates TLS.
+- **`AUTH_DISABLED` is loopback-only.** It removes every check at once, so whoever can
+  reach the ports gets your Tor bandwidth, the session table and instance control, with
+  nothing left to guess. The process cannot tell whether you are exposed — in a container
+  the bind is always `0.0.0.0` and it is the host's publish that decides — so it does not
+  refuse to start, it only warns. Check `curl -s localhost:8080/api/auth/status` if you are
+  unsure whether a pool has it on.
 - **Give a scraper a `proxy`-scoped token, not an `admin` one.** A `proxy` token moves
   bytes and manages its own sessions; an `admin` token can also resize the pool, restart
   instances and read every session key.

@@ -9,13 +9,27 @@ services:
     restart: unless-stopped
 
     environment:
-      # The dashboard login, admin / admin unless you set one — convenient for a
-      # pool on your own machine, which is what this file publishes by default.
+      # Authentication is OFF by default here. Every port below is published to
+      # 127.0.0.1, so the only caller is this machine, and minting a token to talk
+      # to your own container buys nothing: a plain socks5h://127.0.0.1:9250
+      # works and the dashboard opens straight to the pool.
       #
-      # Change it before you widen API_PUBLISH below. Set it to nothing at all
-      # (ADMIN_PASSWORD=) and the first boot generates one instead and prints it
-      # once to this container's log, which is the safe default for a host that
-      # is reachable from anywhere. A password set here is never written to disk.
+      # Set AUTH_DISABLED=false before you widen any *_PUBLISH line. Left on with
+      # the ports open, this hands your Tor bandwidth, the session table and
+      # instance control to anyone who can reach them, and there is nothing left
+      # for them to guess. Startup prints a banner while it is on, and the
+      # dashboard shows an "auth disabled" tag where sign-out normally is.
+      AUTH_DISABLED: '${AUTH_DISABLED:-true}'
+
+      # The dashboard login, used once AUTH_DISABLED is false. admin / admin
+      # unless you set one, so change it in the same breath as widening
+      # API_PUBLISH. Set it to nothing at all (ADMIN_PASSWORD=) and the first boot
+      # generates one instead and prints it once to this container's log, which is
+      # the safe default for a host that is reachable from anywhere. A password
+      # set here is never written to disk.
+      #
+      # These are provisioned even while authentication is off, so turning it on
+      # is a restart and not a second round of setup.
       ADMIN_USER: '${ADMIN_USER:-admin}'
       ADMIN_PASSWORD: '${ADMIN_PASSWORD:-admin}'
 
@@ -50,15 +64,19 @@ services:
       # SOCKS5 proxy — the sticky endpoint your scraper connects to. The username
       # is the session key and the password is a token:
       #   socks5h://my-session:tp_xxxxxxxxxxxxxxxxxxxxxx@127.0.0.1:9250
+      # With AUTH_DISABLED on, the password is ignored and may be omitted —
+      # socks5h://my-session:x@127.0.0.1:9250, or drop the userinfo entirely and
+      # take DEFAULT_SESSION. Keep the username: it is what pins you to one exit.
       - '${SOCKS_PUBLISH:-127.0.0.1:9250}:9250'
 
       # HTTP/HTTPS CONNECT proxy, for tools without SOCKS support.
       - '${HTTP_PUBLISH:-127.0.0.1:9251}:9251'
 
-      # Dashboard and REST API. Still bound to loopback even though it now
-      # requires a credential: there is no TLS here, so the password and every
-      # token cross the wire in cleartext. Widen this only behind something that
-      # terminates TLS.
+      # Dashboard and REST API. Loopback, and this is the line that makes the
+      # AUTH_DISABLED default above safe — widening it without also setting
+      # AUTH_DISABLED=false publishes unauthenticated instance control. Even with
+      # a credential there is no TLS here, so the password and every token cross
+      # the wire in cleartext: widen this only behind something that terminates it.
       - '${API_PUBLISH:-127.0.0.1:8080}:8080'
 
     # Persist tor state so restarts re-bootstrap from a cached consensus instead

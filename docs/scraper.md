@@ -8,6 +8,11 @@ the one printed on the pool's first boot. The same token authenticates both the 
 port and the session routes `scraper` calls, and a `proxy`-scoped one cannot resize the
 pool or restart instances if the config leaks.
 
+Against a pool running with `AUTH_DISABLED` — which is what `compose.yml` sets — the
+`token` below can be any string or left out entirely. Set one anyway if the pool might be
+closed later: the password is ignored while the flag is on, so a config with a real token
+works in both cases and needs no second edit.
+
 ```python
 from scraper import Scraper, TorPoolProxyUrl, default_config
 

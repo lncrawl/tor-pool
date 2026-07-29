@@ -33,9 +33,15 @@ npm --prefix web run typecheck
 npm --prefix web run build
 ```
 
-The dev server proxies to a torpool container, so bring one up first, and sign in with
-its credentials — set `ADMIN_PASSWORD` in your `.env` rather than hunting for the
-generated one in `docker compose logs` every time you recreate the container.
+The dev server proxies to a torpool container, so bring one up first. `compose.yml` sets
+`AUTH_DISABLED=true`, so there is nothing to sign in with and the dashboard opens straight
+to the pool.
+
+To work on the sign-in screen or anything scope-related, put `AUTH_DISABLED=false` and an
+`ADMIN_PASSWORD` in your `.env` — set the password rather than hunting for the generated one
+in `docker compose logs` every time you recreate the container. The provider asks
+`GET /api/auth/status` before it renders either branch, so switching the flag needs a
+container restart and a page reload, not a rebuild.
 
 `npm run build` writes into `internal/server/dist`, which `go:embed` picks up — a
 committed placeholder lives there so `go build` works without ever running npm. Do not

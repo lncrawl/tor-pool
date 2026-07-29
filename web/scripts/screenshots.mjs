@@ -3,7 +3,7 @@
 // Run against a pool that already has traffic, or every chart is empty and the
 // screenshots undersell the thing. From the repo root:
 //
-//   docker compose up -d --build
+//   AUTH_DISABLED=false ADMIN_PASSWORD=... docker compose up -d --build
 //   # drive some requests through the SOCKS port, then:
 //   docker run --rm --add-host=host.docker.internal:host-gateway \
 //     -e ADMIN_PASSWORD=... \
@@ -12,7 +12,9 @@
 //     sh -c "npm i playwright@1.49.1 --silent && node screenshots.mjs"
 //
 // ADMIN_PASSWORD is required: the dashboard is behind a sign-in screen, and on a
-// first run the password is generated and printed to the container log.
+// first run the password is generated and printed to the container log. Note the
+// AUTH_DISABLED=false above — compose.yml turns authentication off by default, and
+// the header then shows an "auth disabled" tag where the sign-out control belongs.
 //
 // Playwright is not a project dependency: it is only needed to refresh the
 // screenshots, and pulling a browser into every install is not worth it.
