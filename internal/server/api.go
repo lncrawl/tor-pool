@@ -107,15 +107,26 @@ func (s *Server) routes() []route {
 			func(_ *http.Request, id int) error { return boolErr(s.pool.ReleaseInstance(id)) })},
 		{method: "POST", path: "/api/instances/{id}/drain", need: auth.ScopeAdmin, handler: s.handleDrain},
 
-		// Rotating and reporting a failure are the data plane's own control
-		// surface: the scraper calls both with the token it already holds. Under
-		// the admin scope, that token could also resize the pool and restart
-		// instances. Dropping someone else's session stays an operator action.
+		// Rotating, reporting a failure and releasing are the data plane's own
+		// control surface: the scraper calls them with the token it already holds.
+		// Under the admin scope, that token could also resize the pool and restart
+		// instances, so these stay narrow. Listing every session is still an
+		// operator view — one caller has no business enumerating the others.
+		//
+		// DELETE is on the proxy scope because a client releasing the session it
+		// created is housekeeping, not administration, and requiring admin for it
+		// meant no client could ever do it. They then accumulated until
+		// SESSION_TTL, and a caller that opened several in a row exhausted the
+		// pool — which surfaces downstream as a connection failure and gets
+		// blamed on the destination rather than on the leak. A key is an identity
+		// hint and not a boundary (see internal/pool/sessions.go), so this does
+		// not stop one caller dropping another's; every token is the same
+		// operator's, and the alternative was a guaranteed leak.
 		{method: "GET", path: "/api/sessions", need: auth.ScopeAdmin, handler: s.handleSessions},
 		{method: "GET", path: "/api/sessions/{key}", need: auth.ScopeProxy, handler: s.handleSession},
 		{method: "POST", path: "/api/sessions/{key}/rotate", need: auth.ScopeProxy, handler: s.handleSessionRotate},
 		{method: "POST", path: "/api/sessions/{key}/failure", need: auth.ScopeProxy, handler: s.handleSessionFailure},
-		{method: "DELETE", path: "/api/sessions/{key}", need: auth.ScopeAdmin, handler: s.handleSessionDrop},
+		{method: "DELETE", path: "/api/sessions/{key}", need: auth.ScopeProxy, handler: s.handleSessionDrop},
 
 		{method: "GET", path: "/api/events", need: auth.ScopeAdmin, handler: s.handleEvents},
 		{method: "GET", path: "/api/stats/history", need: auth.ScopeAdmin, handler: s.handleHistory},

@@ -27,7 +27,8 @@ username stays the session key — see [scraper.md](scraper.md).
 A token carries one:
 
 - **`proxy`** — proxy traffic, plus the session routes a caller uses to manage the
-  sessions it created: `GET /api/sessions/{key}`, `POST …/rotate`, `POST …/failure`.
+  sessions it created: `GET /api/sessions/{key}`, `POST …/rotate`, `POST …/failure`,
+  `DELETE /api/sessions/{key}`.
 - **`admin`** — everything, proxy traffic included.
 
 Give a scraper `proxy`. Under `admin` the credential in its config could also resize
@@ -260,6 +261,12 @@ operator set `QUARANTINE_FAILURES` to `1`.
 ### `DELETE /api/sessions/{key}`
 
 Unpins the session; its next request is reassigned. `204` on success.
+
+Call this when you are finished with a session. It is on the `proxy` scope precisely so
+that a client can: a session that is never released occupies a slot until `SESSION_TTL`,
+and a caller that opens several in a row exhausts the pool. That failure arrives at the
+client as a connection error with nothing to say it was self-inflicted, so it tends to
+be attributed to the destination instead of to the leak.
 
 ## Events, stats, stream
 

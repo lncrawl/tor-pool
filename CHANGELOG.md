@@ -9,6 +9,25 @@ means.
 
 ## [Unreleased]
 
+### Changed
+
+- **`DELETE /api/sessions/{key}` moves from the `admin` scope to `proxy`**, so a client
+  can release the session it created. Under `admin` no client ever could: a scraper
+  holds a `proxy` token by design, so every session it opened sat in its slot until
+  `SESSION_TTL` and a caller that opened several in a row walked the pool out of
+  capacity. The symptom arrives nowhere near the cause — the next connection simply
+  fails, and a client with a proxy in the path reads a dead connection as evidence
+  about the exit, so it gets blamed on the destination rather than on the leak.
+
+  Releasing a session you created is housekeeping, not administration. `GET
+  /api/sessions` stays `admin`: enumerating everyone else's sessions is an operator
+  view. As documented at `internal/pool/sessions.go`, a key is an identity hint and not
+  a boundary, so this does not stop one caller dropping another's — every token belongs
+  to the same operator, and the alternative was a guaranteed leak.
+
+  Nothing to migrate: an `admin` token still works, and `lncrawl-scraper` 1.0 is the
+  first client to call this.
+
 ### Added
 
 - **Failure reports are typed, and weighed by what they say.**

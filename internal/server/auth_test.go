@@ -142,6 +142,10 @@ func TestProxyTokenReachesItsOwnSessionRoutes(t *testing.T) {
 		{http.MethodGet, "/api/sessions/unknown-key"},
 		{http.MethodPost, "/api/sessions/unknown-key/rotate"},
 		{http.MethodPost, "/api/sessions/unknown-key/failure"},
+		// Releasing is housekeeping, not administration. Under the admin scope no
+		// client could ever do it, so sessions accumulated until SESSION_TTL and a
+		// caller opening several in a row exhausted the pool.
+		{http.MethodDelete, "/api/sessions/unknown-key"},
 	} {
 		rec := doAs(t, s, s.token, c.method, c.path, "")
 		// 404 for a session that does not exist is the right answer; 401 or 403
