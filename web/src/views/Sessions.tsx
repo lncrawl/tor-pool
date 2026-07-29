@@ -23,7 +23,15 @@ import { formatBytes } from '../theme';
 // pushing them all every second would dwarf the rest of the stream.
 const refreshInterval = 3000;
 
-export function Sessions() {
+/**
+ * Sessions lists the pinned sessions, polling while it is on screen.
+ *
+ * `active` is required rather than optional. The tab strip keeps hidden panes
+ * mounted, so an unguarded interval here kept fetching for the life of the page
+ * once the tab had been opened even once — and it has to be the caller that says
+ * so, because a mounted-but-hidden pane cannot tell the difference itself.
+ */
+export function Sessions({ active }: { active: boolean }) {
   const { instances } = useLive();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [filter, setFilter] = useState('');
@@ -31,6 +39,8 @@ export function Sessions() {
   const [toast, toastHost] = message.useMessage();
 
   useEffect(() => {
+    if (!active) return;
+
     let cancelled = false;
     const load = () =>
       api
@@ -40,13 +50,15 @@ export function Sessions() {
         })
         .catch(() => undefined);
 
+    // Immediately as well as on the interval, so returning to the tab shows
+    // current data rather than whatever was left from the last visit.
     load();
     const timer = setInterval(load, refreshInterval);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [active]);
 
   const run = async (key: string, label: string, fn: () => Promise<unknown>) => {
     setBusy(key);

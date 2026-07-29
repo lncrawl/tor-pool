@@ -8,6 +8,8 @@ import {
   Layout,
   Switch,
   Tabs,
+  Tag,
+  Tooltip,
   Typography,
   theme,
 } from 'antd';
@@ -61,7 +63,8 @@ function Shell({
   onToggleTheme: (v: boolean) => void;
 }) {
   const { pool, connected } = useLive();
-  const { user, signOut } = useAuth();
+  const { user, signOut, required } = useAuth();
+  const [tab, setTab] = useState('overview');
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -111,9 +114,20 @@ function Shell({
               checkedChildren="dark"
               unCheckedChildren="light"
             />
-            <Button size="small" onClick={signOut} style={{ whiteSpace: 'nowrap' }}>
-              Sign out{user ? ` (${user})` : ''}
-            </Button>
+            {/* No sign-out under AUTH_DISABLED: there is no session to end, and a
+                button that clears a credential nothing checks would appear to do
+                nothing. The tag replaces it so the state is never invisible. */}
+            {required ? (
+              <Button size="small" onClick={signOut} style={{ whiteSpace: 'nowrap' }}>
+                Sign out{user ? ` (${user})` : ''}
+              </Button>
+            ) : (
+              <Tooltip title="AUTH_DISABLED is set: the proxy and the API accept any caller. Safe only while these ports are reachable from this machine alone.">
+                <Tag color="warning" style={{ margin: 0, whiteSpace: 'nowrap' }}>
+                  auth disabled
+                </Tag>
+              </Tooltip>
+            )}
           </Flex>
         </Flex>
       </Layout.Header>
@@ -129,14 +143,31 @@ function Shell({
           />
         )}
 
+        {/* Controlled, and destroyOnHidden stays false: hidden panes keep their
+            sort, filter and pagination state, which is worth more than the
+            memory. The cost is that a pane's effects keep running once it has
+            been opened, so anything that polls needs to be told when it is not
+            on screen — see Sessions. Views that read useLive() need nothing:
+            they share one stream whatever is visible. */}
         <Tabs
           destroyOnHidden={false}
-          defaultActiveKey="overview"
+          activeKey={tab}
+          onChange={setTab}
           items={[
             { key: 'overview', label: 'Overview', children: <Overview dark={dark} /> },
             { key: 'instances', label: 'Instances', children: <Instances /> },
-            { key: 'sessions', label: 'Sessions', children: <Sessions /> },
-            { key: 'tokens', label: 'Tokens', children: <Tokens /> },
+            {
+              key: 'sessions',
+              label: 'Sessions',
+              children: <Sessions active={tab === 'sessions'} />,
+            },
+            // Nothing checks a token under AUTH_DISABLED, so the tab would offer
+            // to issue credentials that do not decide anything. Dropped rather
+            // than disabled: the tokens are still stored and still start working
+            // the moment the flag goes, so there is nothing broken to explain.
+            ...(required
+              ? [{ key: 'tokens', label: 'Tokens', children: <Tokens /> }]
+              : []),
             { key: 'events', label: 'Events', children: <Events /> },
           ]}
         />
