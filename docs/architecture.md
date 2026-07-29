@@ -113,9 +113,38 @@ Per instance, over a sliding window, from two sources:
   blocks, because the balancer cannot see inside an HTTPS tunnel.
 
 Quarantine triggers on consecutive failures (a hard-dead instance drops out fast) or on
-a windowed count (an instance failing half its requests never accumulates consecutive
+a windowed **score** (an instance failing half its requests never accumulates consecutive
 failures but is just as unusable). A success resets the consecutive count but not the
 window — an instance failing every other request is still unhealthy.
+
+A score rather than a count, because failures are not equally damning and the source
+does not say which is which. What a client reports — the *kind* — does:
+
+| Kind | Says about the exit | Weight |
+| --- | --- | --- |
+| `captcha` | Burnt. A challenge is rarely path-specific | Several reports' worth — at the default threshold, two are enough |
+| `blocked` | Unwelcome, not broken. Retrying never fixes it | Heavy, below a captcha: a 403 can be about the path |
+| `transport`, `other` | It failed; nothing more is known | The baseline |
+| `rate_limited` | It works, and is being asked for too much | Less than one report, and it neither trips the consecutive count nor spends a probation |
+
+`QUARANTINE_FAILURES` still counts whole baseline failures, so a caller that reports
+nothing but untyped failures sees the behaviour it always did. The weights live with the
+kinds in `internal/pool/health.go`; `failure_score` and `quarantine_score` in the API are
+what they add up to.
+
+Two things bound what the weights can do. **A single report never quarantines a healthy
+instance**, however heavy — a caller can misread one page — unless
+`QUARANTINE_FAILURES` is `1`, which is asking for exactly that. And **the consecutive
+trigger is blind to kind**, so a caller failing repeatedly with no success in between
+reaches `QUARANTINE_CONSECUTIVE` first whatever it reports; weighing only decides the
+outcome for a caller still getting work done between failures. That is also why keeping
+rate limits out of the consecutive count matters more than their weight does.
+
+The rate-limit carve-out is the point of typing them at all. A 429 follows the traffic,
+not the IP, so rotating away from one spends a working exit and arrives at the next one
+still throttled — while a captcha is the clearest evidence available that the exit itself
+is spent, and waiting for `QUARANTINE_FAILURES` of those means every report after the
+second is another request answered with a challenge.
 
 ## The remediation ladder
 

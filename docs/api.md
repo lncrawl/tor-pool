@@ -135,7 +135,9 @@ while one is running starts nothing and answers `{"rotating": 0, "in_progress": 
   "retired_exit_ip": "", "exit_confirmed": true, "pinned_exit": "",
   "health": {
     "state": "healthy", "failures_in_window": 0, "consecutive_failures": 0,
+    "failure_score": 0, "quarantine_score": 10,
     "transport_failures": 2, "client_failures": 1,
+    "failures_by_kind": { "transport": 2, "captcha": 1 },
     "remediations": 1, "remediation_rung": "newnym"
   },
   "totals": { "requests": 210, "failures": 3, "bytes_up": 4321, "bytes_down": 987654, "latency_ms": 412.5 }
@@ -161,6 +163,13 @@ discarded so a dashboard can show what it *was*. Never read it as the current ex
 
 `state` is one of `starting`, `healthy`, `degraded`, `probation`, `quarantined`,
 `remediating`.
+
+`failures_in_window` counts the reports still inside `FAILURE_WINDOW`;
+`failure_score` weighs each of them by kind and is the number compared against
+`quarantine_score`. They differ because a captcha counts for several reports and a rate
+limit for less than one — read `failure_score / quarantine_score` as "how close this
+instance is to being quarantined", and `failures_by_kind` for why. Only kinds actually
+seen appear there.
 
 ### Instance actions
 
@@ -213,12 +222,40 @@ the exit IP alone did nothing.
 
 ```bash
 curl -XPOST localhost:8080/api/sessions/alice/failure \
-  -H 'content-type: application/json' -d '{"reason":"http_403"}'
+  -H 'content-type: application/json' -d '{"kind":"captcha","reason":"challenge on /search"}'
+# {"session":"alice","instance":4,"kind":"captcha"}
 ```
 
 The signal that catches soft blocks. The pool relays opaque bytes and cannot see a 403,
 a 429 or a captcha inside an HTTPS tunnel, so without this a burnt exit keeps taking
-traffic until it fails at the transport level. The body is optional.
+traffic until it fails at the transport level.
+
+**What you report matters more than that you reported.** `kind` is one of:
+
+| `kind` | What it says | Weight |
+| --- | --- | --- |
+| `captcha` | The exit IP is burnt — a challenge came back instead of the page | Heaviest: quarantines well before `QUARANTINE_FAILURES` reports |
+| `blocked` | The destination refuses this exit (403, IP-reputation page) | Heavy — retrying never becomes welcome |
+| `transport` | Nothing came back at all: refused, reset, timed out | One report |
+| `other` | You could not tell | One report |
+| `rate_limited` | A 429 — the exit works and is being asked for too much | Lightest, and never re-quarantines an instance on probation |
+
+Everything is optional. `reason` is free text kept for the audit log, and is what the
+report is typed from when `kind` is absent — the aliases `http_403`, `challenge`,
+`transport`, `429` and the bare status codes all map to the right kind, so callers written
+against the older free-text field keep working. Unrecognised text counts as `other` rather
+than being refused, and **a bodyless `POST` is still a valid signal** — it counts as
+`other`, exactly as it always did. The response echoes the `kind` the report was read as.
+
+Reporting a rate limit as `blocked` is worse than reporting nothing: it retires a working
+exit and takes the rate limit along to the next one.
+
+The weight decides one of two triggers. `QUARANTINE_CONSECUTIVE` is blind to kind and
+still caps every report that blames the exit, so if you report failures with no
+successful request in between you reach that limit first whatever you send — the weights
+are what separate your reports when you are still getting work done between them. A
+single report never quarantines a healthy instance on its own, however heavy, unless the
+operator set `QUARANTINE_FAILURES` to `1`.
 
 ### `DELETE /api/sessions/{key}`
 

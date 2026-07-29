@@ -15,30 +15,32 @@ import (
 //
 // Both signals land here so one ladder governs them: an instance blocked at the
 // HTTP level and an instance whose TCP connections reset are equally unusable,
-// and mixing the two counts is deliberate.
+// and mixing the two counts is deliberate. What is *not* mixed is the kind — a
+// captcha and a rate limit are both failures and say opposite things about the
+// exit, so the weighing happens in health.recordFailure.
 //
 // Failures inside an instance's own rotation window are not scored at all. A
 // rotation deliberately destroys the circuits in-flight requests were using, so
 // those requests fail because of the rotation, not because of the instance —
 // blaming it turned every few rotations into a quarantine, whose remediation
 // rotated it again.
-func (p *Pool) RecordFailure(instance int, source FailureSource, reason string) {
+func (p *Pool) RecordFailure(instance int, source FailureSource, kind FailureKind, reason string) {
 	now := time.Now()
 	if p.rotationWindow(instance, now) {
 		p.log.Debug("failure during rotation is not scored",
-			"instance", instance, "source", source, "reason", reason)
+			"instance", instance, "source", source, "kind", kind, "reason", reason)
 		return
 	}
 
 	h := p.healthFor(instance)
-	if !h.recordFailure(source, now, p.policy()) {
+	if !h.recordFailure(source, kind, now, p.policy()) {
 		return
 	}
 
 	p.log.Warn("instance quarantined",
-		"instance", instance, "source", source, "reason", reason)
+		"instance", instance, "source", source, "kind", kind, "reason", reason)
 	p.events.Instance(stats.EventQuarantine, instance,
-		"quarantined after repeated failures", string(source)+": "+reason)
+		"quarantined after repeated failures", failureDetail(source, kind, reason))
 
 	// Sessions are unpinned now rather than when they next ask, so a caller
 	// never gets handed an instance already known to be bad.
@@ -48,6 +50,18 @@ func (p *Pool) RecordFailure(instance int, source FailureSource, reason string) 
 	}
 
 	p.startRemediation(instance)
+}
+
+// failureDetail renders a failure for the audit log.
+//
+// The reason is free text a caller chose, so it may be empty and it may say
+// nothing the kind does not already say.
+func failureDetail(source FailureSource, kind FailureKind, reason string) string {
+	detail := string(source) + " " + string(kind)
+	if reason != "" && reason != string(kind) {
+		detail += ": " + reason
+	}
+	return detail
 }
 
 // RecordSuccess decays an instance's failure score.

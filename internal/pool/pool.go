@@ -175,15 +175,23 @@ func (p *Pool) healthFor(instance int) *health {
 // Health returns the reportable health of every instance.
 func (p *Pool) Health() map[int]HealthView {
 	now := time.Now()
-	window := p.cfg.FailureWindow
+	policy := p.policy()
 
 	instances := p.fleet.Instances()
 	out := make(map[int]HealthView, len(instances))
 	for _, inst := range instances {
-		out[inst.Index()] = p.healthFor(inst.Index()).snapshot(now, window)
+		out[inst.Index()] = p.healthFor(inst.Index()).snapshot(now, policy)
 	}
 	return out
 }
+
+// QuarantineScore is the weighted failure score that takes an instance out of
+// rotation.
+//
+// Exported for reporting: a failure score means nothing without the threshold it
+// is measured against, and QUARANTINE_FAILURES is not that threshold — it counts
+// baseline failures, while a captcha is worth several of those.
+func (p *Pool) QuarantineScore() int { return p.policy().quarantineScore() }
 
 // forgetInstance drops health state for a retired instance so the maps do not
 // grow across resizes.
@@ -426,15 +434,17 @@ func (p *Pool) RotateSession(key string, newnym bool) (*tor.Instance, error) {
 // ReportFailure records a failure a client observed itself.
 //
 // This is the only signal that catches soft blocks: a 403, a 429 or a captcha
-// is invisible to the balancer because it is inside an HTTPS tunnel.
-func (p *Pool) ReportFailure(key, reason string) (instance int, ok bool) {
+// is invisible to the balancer because it is inside an HTTPS tunnel. The kind is
+// what the pool acts on; reason is the caller's own free text, kept for the
+// audit log and never parsed here.
+func (p *Pool) ReportFailure(key string, kind FailureKind, reason string) (instance int, ok bool) {
 	instance, ok = p.sessions.recordFailure(key)
 	if !ok {
 		return 0, false
 	}
 	p.log.Info("client reported failure",
-		"session", key, "instance", instance, "reason", reason)
-	p.RecordFailure(instance, SourceClient, reason)
+		"session", key, "instance", instance, "kind", kind, "reason", reason)
+	p.RecordFailure(instance, SourceClient, kind, reason)
 	return instance, true
 }
 

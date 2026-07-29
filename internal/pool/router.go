@@ -23,10 +23,11 @@ func (p *Pool) RouteAddr(sessionKey string) (instance int, socksAddr string, err
 //
 // Transport failures are what the balancer can see for itself: a refused SOCKS
 // handshake, a reset, a timeout. They are blind to HTTP-level blocking, which is
-// why ReportFailure exists alongside this.
+// why ReportFailure exists alongside this — and why the balancer can only ever
+// report KindTransport, whatever the request was actually answered with.
 func (p *Pool) RecordTransportFailure(instance int, reason string) {
 	p.log.Debug("transport failure", "instance", instance, "reason", reason)
-	p.RecordFailure(instance, SourceTransport, reason)
+	p.RecordFailure(instance, SourceTransport, KindTransport, reason)
 }
 
 // SampleExit re-reads an instance's exit relay, debounced per instance.

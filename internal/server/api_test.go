@@ -182,6 +182,41 @@ func TestUnknownSessionIs404(t *testing.T) {
 	}
 }
 
+func TestFailureReportsAreTyped(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, reason string
+		want               pool.FailureKind
+	}{
+		{name: "nothing at all", want: pool.KindOther},
+		{name: "explicit kind", kind: "captcha", want: pool.KindCaptcha},
+		{name: "kind wins over reason", kind: "captcha", reason: "http_403", want: pool.KindCaptcha},
+		// The field was free text before it was typed, and this is what scraper
+		// sends today.
+		{name: "classified from reason", reason: "http_403", want: pool.KindBlocked},
+		{name: "free text falls back", reason: "the page looked wrong", want: pool.KindOther},
+		// A misspelled kind is not fatal; the reason still gets its chance.
+		{name: "bad kind, good reason", kind: "captchaa", reason: "challenge", want: pool.KindCaptcha},
+	} {
+		if got := classifyFailure(tc.kind, tc.reason); got != tc.want {
+			t.Errorf("%s: classifyFailure(%q, %q) = %q, want %q",
+				tc.name, tc.kind, tc.reason, got, tc.want)
+		}
+	}
+}
+
+func TestFailureReportAcceptsEveryBodyShape(t *testing.T) {
+	// A bodyless POST is the documented minimum signal, and a body that will not
+	// parse must not lose the report either: 404 here is the pool saying it has no
+	// such session, which is as far as any of these get with an empty fleet. A 400
+	// would mean the endpoint had started refusing signals over their shape.
+	s := newTestServer(t)
+	for _, body := range []string{"", "{}", `{"kind":"captcha"}`, `{"reason":"http_429"}`, "not json"} {
+		if got := do(t, s, http.MethodPost, "/api/sessions/ghost/failure", body).Code; got != http.StatusNotFound {
+			t.Errorf("POST failure with body %q = %d, want 404", body, got)
+		}
+	}
+}
+
 func TestRotateWithNoInstancesIsUnavailable(t *testing.T) {
 	// Not a 500: there is nothing wrong with the server, it simply has no
 	// instance to move the caller to.
@@ -220,6 +255,9 @@ func TestMetricsExposition(t *testing.T) {
 		"torpool_sessions_active",
 		"torpool_requests_total",
 		`torpool_bytes_total{direction="up"}`,
+		// The threshold a failure score is read against, which is not
+		// QUARANTINE_FAILURES: kinds weigh differently.
+		"torpool_quarantine_score ",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q", want)

@@ -416,24 +416,64 @@ func (s *Server) handleSessionRotate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSessionFailure records a failure a caller observed, typed by what it
+// says about the exit.
+//
+// The kind is the whole point of the endpoint: a 429 means the exit works and is
+// busy, a captcha means it is burnt, and weighing them alike had the pool
+// quarantine throttled-but-healthy instances while a challenged one stayed in
+// rotation for four more reports. See pool.FailureKind.
+//
+// Every shape of report is accepted, in this order of preference:
+//
+//	{"kind": "captcha", "reason": "cf challenge on /search"}  typed, with detail
+//	{"reason": "http_403"}                                    classified from text
+//	(no body at all)                                          counted as "other"
+//
+// A bodyless POST is the documented minimum signal and stays exactly that. Text
+// that types to nothing known is counted as pool.KindOther rather than refused:
+// the report is still evidence, and answering 400 would discard the only signal
+// that catches soft blocks over a spelling.
 func (s *Server) handleSessionFailure(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 
 	var body struct {
+		Kind string `json:"kind"`
+		// Reason stays free text for the audit log, and is what the report is
+		// typed from when Kind is absent — it was the only field before kinds
+		// existed, and every deployed caller sends it.
 		Reason string `json:"reason"`
 	}
-	// A failure report with no body is still a valid signal.
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if body.Reason == "" {
-		body.Reason = "unspecified"
+
+	kind := classifyFailure(body.Kind, body.Reason)
+	reason := body.Reason
+	if reason == "" {
+		reason = body.Kind
 	}
 
-	instance, ok := s.pool.ReportFailure(key, body.Reason)
+	instance, ok := s.pool.ReportFailure(key, kind, reason)
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"session": key, "instance": instance})
+	// The kind is echoed back because a caller has no other way to see how its
+	// text was read, and how much the report counted for depends entirely on it.
+	writeJSON(w, map[string]any{"session": key, "instance": instance, "kind": kind})
+}
+
+// classifyFailure types a report from the two fields a caller may send.
+//
+// An explicit kind wins, then the free-text reason, and anything neither field
+// types is KindOther — including a kind that is simply misspelled, which then
+// still gets a chance to be read from the reason.
+func classifyFailure(kind, reason string) pool.FailureKind {
+	for _, text := range []string{kind, reason} {
+		if k, known := pool.ParseFailureKind(text); known {
+			return k
+		}
+	}
+	return pool.KindOther
 }
 
 func (s *Server) handleSessionDrop(w http.ResponseWriter, r *http.Request) {

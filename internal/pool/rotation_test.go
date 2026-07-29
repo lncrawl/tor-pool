@@ -34,17 +34,17 @@ func TestFailuresDuringRotationAreNotScored(t *testing.T) {
 
 	p.beginRotation(0)
 	for range p.cfg.QuarantineConsecutive + 2 {
-		p.RecordFailure(0, SourceTransport, "circuit closed by rotation")
+		p.RecordFailure(0, SourceTransport, KindTransport, "circuit closed by rotation")
 	}
-	if state := p.healthFor(0).snapshot(time.Now(), p.cfg.FailureWindow).State; state == StateQuarantined {
+	if state := p.healthFor(0).snapshot(time.Now(), p.policy()).State; state == StateQuarantined {
 		t.Errorf("state = %s, want an instance still in service", state)
 	}
 
 	// The grace period keeps covering the requests that were already in flight
 	// when the rotation finished.
 	p.endRotation(0)
-	p.RecordFailure(0, SourceTransport, "still draining")
-	if got := p.healthFor(0).snapshot(time.Now(), p.cfg.FailureWindow).ConsecutiveFails; got != 0 {
+	p.RecordFailure(0, SourceTransport, KindTransport, "still draining")
+	if got := p.healthFor(0).snapshot(time.Now(), p.policy()).ConsecutiveFails; got != 0 {
 		t.Errorf("consecutive failures = %d, want 0 inside the grace period", got)
 	}
 
@@ -54,9 +54,9 @@ func TestFailuresDuringRotationAreNotScored(t *testing.T) {
 	p.quietUntil[0] = time.Now().Add(-time.Second)
 	p.healthMu.Unlock()
 	for range p.cfg.QuarantineConsecutive {
-		p.RecordFailure(0, SourceTransport, "genuinely broken")
+		p.RecordFailure(0, SourceTransport, KindTransport, "genuinely broken")
 	}
-	if state := p.healthFor(0).snapshot(time.Now(), p.cfg.FailureWindow).State; state != StateQuarantined {
+	if state := p.healthFor(0).snapshot(time.Now(), p.policy()).State; state != StateQuarantined {
 		t.Errorf("state = %s, want quarantined once the grace period is over", state)
 	}
 }

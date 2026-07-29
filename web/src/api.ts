@@ -8,12 +8,29 @@ export type InstanceState =
   | 'quarantined'
   | 'remediating';
 
+// What a failure report said went wrong, which is what decides how heavily it
+// counts. Orthogonal to who observed it: a client reports a broken socket as
+// readily as the balancer does.
+export type FailureKind =
+  | 'rate_limited'
+  | 'blocked'
+  | 'captcha'
+  | 'transport'
+  | 'other';
+
 export interface Health {
   state: InstanceState;
+  // failures_in_window counts reports; failure_score weighs them by kind and is
+  // what quarantine_score is compared against — a captcha counts for several
+  // reports, a rate limit for less than one.
   failures_in_window: number;
+  failure_score: number;
+  quarantine_score: number;
   consecutive_failures: number;
   transport_failures: number;
   client_failures: number;
+  // Only the kinds actually seen are present, so treat a missing key as zero.
+  failures_by_kind: Partial<Record<FailureKind, number>>;
   remediations: number;
   remediation_rung: string;
 }
