@@ -160,6 +160,27 @@ isn't.
     one entry per rejected proxy connection lets anyone flush the entire audit history in
     seconds, precisely when it matters — and every rejection would serialise through the mutex
     the dashboard streams through. Only operator actions are events.
+18. **A failure report is weighed by its kind, and a rate limit is not evidence about the
+    exit.** A 429 follows the traffic, not the IP: rotating away from one spends a working
+    exit and lands on the next one still throttled, so `KindRateLimited` stays out of the
+    two paths that act on a single report — the consecutive count and the failure that
+    re-quarantines a probationary instance. A captcha is the opposite and quarantines in
+    two. The scores are weights around a baseline, which is what lets
+    `QUARANTINE_FAILURES` keep meaning that many *untyped* failures: change
+    `baselineWeight` and you silently retune every deployment that never sends a `kind`.
+    The endpoint must keep accepting a bodyless `POST` and unrecognised text — both count
+    as `KindOther` — because refusing a malformed report throws away the only signal that
+    sees inside an HTTPS tunnel.
+19. **The weights are relative to `QUARANTINE_FAILURES`, so every promise about them has to
+    hold at every value of it — not just the default.** A weight is capped so no single
+    report can cross the threshold alone: without that the captcha weight *is* the whole
+    threshold once `QUARANTINE_FAILURES` reaches 3, and `operations.md` tells operators to
+    lower it, so one caller misreading one page would retire an instance. `QUARANTINE_FAILURES=1`
+    is the exception, because that is an operator asking for exactly one report. Test the
+    weights across a sweep of thresholds; a single-policy test cannot see any of this.
+    Separately, `QUARANTINE_CONSECUTIVE` is blind to kind and caps every exit-blaming
+    report, so weighing only decides the outcome for a caller that succeeds between
+    failures — do not describe a weight as *the* threshold.
 
 ## Skills
 

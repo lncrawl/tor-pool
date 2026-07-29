@@ -26,10 +26,13 @@ service.
 - **Rotation without the wait** — Tor enforces a ~10 second cooldown between circuit
   changes. Rotating a *session* reassigns it to an instance that has already built its
   circuits, so it takes milliseconds.
-- **Self-healing** — failures are counted per instance from two sides, and a bad one
-  escalates through new circuit → wipe-and-restart → restart with backoff.
+- **Self-healing** — failures are weighed per instance from two sides, by what they say
+  went wrong, and a bad one escalates through new circuit → wipe-and-restart → restart
+  with backoff.
 - **Live dashboard** — see every instance's exit IP, state and traffic; rotate, drain,
   quarantine, restart, and resize the pool while it runs.
+- **Closed by default** — the proxy password is a revocable token, the dashboard and API
+  need a credential, and first boot generates both.
 - **One binary, no dependencies** — Go standard library only, dashboard embedded,
   ~40 MB image.
 
@@ -141,7 +144,10 @@ instance different exits, which would make "an instance is an exit identity" unt
 **Failure signals.** Two, because neither is enough alone. The pool sees transport
 failures itself — refused handshakes, resets, timeouts — but it relays opaque bytes, so
 a 403, a 429 or a captcha is invisible to it. Those come from the client via
-`POST /api/sessions/{key}/failure`.
+`POST /api/sessions/{key}/failure`, which is typed: a `captcha` says the exit is burnt and
+retires it in a fraction of the reports an unexplained failure needs, while a
+`rate_limited` says the exit works and is merely busy, so it barely counts. Weighing them
+alike retired healthy exits and kept burnt ones.
 
 **The remediation ladder.** Enough failures and an instance is quarantined and its
 sessions moved. Then:
@@ -172,7 +178,7 @@ Everything is an environment variable. The common ones:
 | `MIN_READY` | 1 | Serve once this many have bootstrapped. |
 | `DEFAULT_SESSION` | `ip` | How a caller that names no session is pinned: `ip`, `random`, `shared`. |
 | `SESSION_TTL` | 10m | Unpin a session after this long idle. |
-| `QUARANTINE_FAILURES` | 5 | Failures within `FAILURE_WINDOW` before quarantine. |
+| `QUARANTINE_FAILURES` | 5 | Unclassified failures within `FAILURE_WINDOW` before quarantine. A captcha spends several of them, a rate limit less than one. |
 | `TOR_EXIT_NODES` | — | Restrict exits, e.g. `{us},{ca}`. |
 
 <details>
@@ -228,7 +234,7 @@ httpx.post("http://127.0.0.1:8080/api/sessions/my-session/rotate",
 | `POST /api/instances/{id}/rotate` \| `/restart` \| `/quarantine` \| `/release` \| `/drain` | Act on one instance |
 | `POST /api/pool/resize` | Grow or shrink while running |
 | `POST /api/sessions/{key}/rotate` | Move a session to another instance |
-| `POST /api/sessions/{key}/failure` | Report a block you observed |
+| `POST /api/sessions/{key}/failure` | Report a block you observed, as `captcha`, `blocked`, `rate_limited`, `transport` or `other` |
 | `POST /api/auth/login` | Sign in, returns a session credential |
 | `GET` \| `POST /api/tokens` \| `DELETE /api/tokens/{id}` | Issue and revoke proxy tokens |
 | `GET /api/events` | Audit log |

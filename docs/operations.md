@@ -18,7 +18,9 @@ routable count below the pool size means something is quarantined or still start
 
 **Instances** answers "which one is the problem". The failures column shows transport
 and client-reported counts separately — a high client count with no transport failures
-means that exit is being *blocked*, not broken.
+means that exit is being *blocked*, not broken. Hover it for the breakdown by kind and the
+weighted score: captchas mean burnt exits, while a column of nothing but rate limits means
+your callers are going too fast and the exits are fine.
 
 **Sessions** answers "why does this caller keep failing". Find the key, see which
 instance it is pinned to, cross-reference in Instances.
@@ -33,7 +35,11 @@ trigger.
 1. Check Events for what quarantined them. All at once usually means the *target* is
    blocking your whole IP range, or your egress is broken — not the instances.
 2. If it was a burst of client-reported failures against one site, your thresholds may
-   be too tight for that target. Raise `QUARANTINE_FAILURES`.
+   be too tight for that target. Raise `QUARANTINE_FAILURES`. Check what the reports said
+   first: a wall of `rate_limited` means your callers are too fast for the target rather
+   than the exits being bad, and if a client is sending `blocked` or `captcha` for what is
+   really a 429, fix the client — a mislabelled rate limit retires a working exit and the
+   next one is throttled just the same.
 3. To force recovery now: `POST /api/instances/{id}/release` on one, and see if traffic
    flows. Release clears its accumulated failures.
 
@@ -45,9 +51,11 @@ be minutes, deliberately.
 - Lower `QUARANTINE_FAILURES` and `QUARANTINE_CONSECUTIVE` so a burnt exit is retired
   after fewer blocked requests.
 - Raise `POOL_SIZE` so there is somewhere to move to.
-- Make sure your client actually reports blocks. Without
+- Make sure your client actually reports blocks, and reports them honestly. Without
   `POST /api/sessions/{key}/failure`, the pool only sees transport errors and a
-  soft-blocked exit looks perfectly healthy.
+  soft-blocked exit looks perfectly healthy; with every failure sent as one undifferentiated
+  reason, a captcha waits as long as a 429 does. A client that sends `kind` gets a burnt exit
+  retired in two reports without lowering the threshold for everything else.
 - Consider `TOR_EXIT_NODES` if the target blocks whole regions — but a narrow policy
   shrinks the relay set and makes circuits slower and less diverse.
 
@@ -132,6 +140,11 @@ From `/metrics`:
   `torpool_instances_total` for a sustained period.
 - `torpool_instance_failures_total{source="client"}` — a rising rate means exits are
   being blocked, which no transport-level check would catch.
+- `torpool_instance_failure_kinds_total{kind="captcha"}` — the same rate split by what
+  the reports said. Captchas climbing while `kind="rate_limited"` is flat is a blocking
+  problem; the reverse is a pacing problem, and no amount of rotation fixes it.
+- `torpool_instance_failure_score` against `torpool_quarantine_score` — how close each
+  instance is to being taken out of rotation, which the report count alone does not say.
 - `torpool_instance_remediations_total` — climbing steadily means the ladder is
   thrashing; the thresholds are probably too tight.
 

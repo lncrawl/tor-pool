@@ -39,11 +39,16 @@ dashboard.
 
 The engine reports automatically on:
 
-| Signal | Reason sent |
-| --- | --- |
-| `ProxyError` / `ConnectionError` | `transport` |
-| HTTP 403 | `http_403` |
-| A Cloudflare challenge | `challenge` |
+| Signal | Reason sent | Typed as |
+| --- | --- | --- |
+| `ProxyError` / `ConnectionError` | `transport` | `transport` |
+| HTTP 403 | `http_403` | `blocked` |
+| A Cloudflare challenge | `challenge` | `captcha` |
+| HTTP 429 with no challenge behind it | `rate_limited` | `rate_limited` |
+
+A Cloudflare challenge often arrives *as* a 429, and the challenge handlers look at the
+body rather than the status, so a challenged response is reported as one — the last row is
+a plain throttle only.
 
 Call it yourself when your own code detects a block:
 
@@ -55,6 +60,16 @@ This matters more than it looks. The pool relays opaque bytes and cannot see a 4
 captcha inside an HTTPS tunnel, so without these reports a burnt exit keeps taking
 traffic until it happens to fail at the transport level. Set `report_failures=False` to
 opt out.
+
+**What you send decides what happens.** The pool types every report and weighs it: a
+`captcha` retires the exit in the fewest reports, `http_403` in a few more, and a 429
+barely counts because the exit is working and a fresh one arrives to the same rate limit.
+So report a throttle as `rate_limited` (or `429`) rather than as a generic failure — and
+never as a block, which spends a healthy exit. The engine does this for the signals in the
+table above; anything else is a judgement only your own code can make. The
+full vocabulary and the thresholds it feeds are in
+[api.md](api.md#post-apisessionskeyfailure); anything the pool does not recognise counts
+as one unremarkable failure.
 
 ## The connection-pool caveat
 

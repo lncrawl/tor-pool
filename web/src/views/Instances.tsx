@@ -16,9 +16,42 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
-import { api, type Instance } from '../api';
+import { api, type FailureKind, type Health, type Instance } from '../api';
 import { useLive } from '../live';
 import { formatBytes, formatDuration, stateColor } from '../theme';
+
+// describeKinds lists what the reports actually said, worst first — the ordering
+// operations reads by, because a captcha means the exit is burnt while a rate
+// limit means it is working and busy.
+function describeKinds(byKind: Health['failures_by_kind']): string {
+  const order: Array<[FailureKind, string]> = [
+    ['captcha', 'captcha'],
+    ['blocked', 'blocked'],
+    ['transport', 'transport'],
+    ['other', 'unclassified'],
+    ['rate_limited', 'rate limited'],
+  ];
+  return order
+    .filter(([kind]) => (byKind[kind] ?? 0) > 0)
+    .map(([kind, label]) => `${byKind[kind]} ${label}`)
+    .join(', ');
+}
+
+// failureColor grades the recent-failures tag by the score, not the count.
+//
+// The count alone is the misleading half of this column: one captcha is closer to
+// quarantine than nine rate limits are, so a tag that only counts puts the
+// instance about to be retired below the one that is fine. The score is in the
+// tooltip; the colour is what makes it readable without hovering every row.
+function failureColor(health: Health): string {
+  const ratio =
+    health.quarantine_score > 0
+      ? health.failure_score / health.quarantine_score
+      : 0;
+  if (ratio >= 0.66) return 'red';
+  if (ratio >= 0.33) return 'orange';
+  return 'gold';
+}
 
 export function Instances() {
   const { pool, instances } = useLive();
@@ -153,20 +186,39 @@ export function Instances() {
       title: 'Failures',
       key: 'failures',
       width: 140,
-      render: (_, r) => (
+      render: (_, r) => {
+        const kinds = describeKinds(r.health.failures_by_kind);
+        return (
         <Tooltip
-          title={`${r.health.transport_failures} seen by the balancer, ${r.health.client_failures} reported by clients`}
+          title={
+            <>
+              <div>
+                {r.health.transport_failures} seen by the balancer,{' '}
+                {r.health.client_failures} reported by clients
+              </div>
+              {kinds && <div>{kinds}</div>}
+              {/* The score, not the count, is what quarantines: a captcha
+                  weighs several reports and a rate limit less than one. */}
+              <div>
+                score {r.health.failure_score} of {r.health.quarantine_score}{' '}
+                before quarantine
+              </div>
+            </>
+          }
         >
           <Space size={4}>
             <Typography.Text>{r.health.transport_failures}</Typography.Text>
             <Typography.Text type="secondary">/</Typography.Text>
             <Typography.Text>{r.health.client_failures}</Typography.Text>
             {r.health.failures_in_window > 0 && (
-              <Tag color="gold">{r.health.failures_in_window} recent</Tag>
+              <Tag color={failureColor(r.health)}>
+                {r.health.failures_in_window} recent
+              </Tag>
             )}
           </Space>
         </Tooltip>
-      ),
+        );
+      },
     },
     {
       title: 'Latency',

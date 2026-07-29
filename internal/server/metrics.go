@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/lncrawl/tor-pool/internal/pool"
 )
 
 // handleMetrics writes the Prometheus text exposition format.
@@ -90,6 +92,30 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(&b, "torpool_instance_failures_total{instance=\"%d\",source=\"client\"} %d\n",
 			inst.ID, inst.Health.ClientFailures)
 	}
+
+	metric(&b, "torpool_instance_failure_kinds_total", "counter",
+		"Failures per instance, by what the report said went wrong.")
+	for i := range instances {
+		inst := &instances[i]
+		// Every kind, seen or not: a label that only appears after the first
+		// captcha is one no alert can be written against.
+		for _, kind := range pool.FailureKinds {
+			fmt.Fprintf(&b, "torpool_instance_failure_kinds_total{instance=\"%d\",kind=\"%s\"} %d\n",
+				inst.ID, kind, inst.Health.FailuresByKind[kind])
+		}
+	}
+
+	metric(&b, "torpool_instance_failure_score", "gauge",
+		"Weighted failure score inside the window, where kinds count for more or less than one report.")
+	for i := range instances {
+		inst := &instances[i]
+		fmt.Fprintf(&b, "torpool_instance_failure_score{instance=\"%d\"} %d\n",
+			inst.ID, inst.Health.FailureScore)
+	}
+
+	metric(&b, "torpool_quarantine_score", "gauge",
+		"Failure score at which an instance is quarantined, for comparison with torpool_instance_failure_score.")
+	fmt.Fprintf(&b, "torpool_quarantine_score %d\n", s.pool.QuarantineScore())
 
 	metric(&b, "torpool_instance_bytes_total", "counter",
 		"Bytes relayed per instance, by direction.")

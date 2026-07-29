@@ -9,6 +9,38 @@ means.
 
 ## [Unreleased]
 
+### Added
+
+- **Failure reports are typed, and weighed by what they say.**
+  `POST /api/sessions/{key}/failure` accepts `kind`: `captcha`, `blocked`,
+  `rate_limited`, `transport` or `other`. A captcha means the exit IP is burnt, so it
+  quarantines the instance in two reports instead of `QUARANTINE_FAILURES` of them; a 429
+  means the exit works and is being asked for too much, so it counts for less than one
+  report, never trips the consecutive count, and never spends an instance's probation.
+  Rotating away from a rate limit discards a working exit and arrives at the next one
+  still throttled.
+
+  Nothing breaks. `reason` is still accepted, still free text in the audit log, and is
+  what a report is typed from when `kind` is absent — the reasons `lncrawl-scraper` sends
+  (`transport`, `http_403`, `challenge`, and now `rate_limited`) map to the kinds they
+  mean, unrecognised text counts as `other`, and **a bodyless `POST` remains a valid
+  signal** worth exactly one unremarkable failure. The response echoes the kind the report
+  was read as, since that decides what it counted for. `QUARANTINE_FAILURES` still means
+  that many *untyped* failures, and no single report — however heavy — retires an instance
+  on its own unless you set it to `1`.
+
+  Two things bound this, and neither is a weight. `QUARANTINE_CONSECUTIVE` is blind to
+  kind, so a caller failing with no success in between still hits that limit first
+  whatever it reports; the weighing is what separates reports from a caller that is still
+  getting work done. And keeping rate limits out of that count, and out of the failure
+  that ends a probation, does more for a throttled caller than their weight does.
+
+- **`failure_score`, `quarantine_score` and `failures_by_kind`** in each instance's
+  health, and `torpool_instance_failure_kinds_total`,
+  `torpool_instance_failure_score` and `torpool_quarantine_score` in `/metrics`. The
+  report count no longer says how close an instance is to quarantine; the score does.
+  Instances' failures column shows the breakdown on hover.
+
 ## [0.2.0] - 2026-07-29
 
 Authentication. **Every existing caller breaks until it presents a credential** — see

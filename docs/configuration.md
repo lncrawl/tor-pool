@@ -86,9 +86,15 @@ circuits.
 
 Two thresholds, because they catch different failures:
 
-- `QUARANTINE_CONSECUTIVE` catches a hard-dead instance fast.
+- `QUARANTINE_CONSECUTIVE` catches a hard-dead instance fast. It is blind to what the
+  failures were, so it caps every report that blames the exit — a caller failing with no
+  success in between hits this one first, whatever it reports.
 - `QUARANTINE_FAILURES` within `FAILURE_WINDOW` catches an instance failing half its
-  requests, which never accumulates consecutive failures but is just as unusable.
+  requests, which never accumulates consecutive failures but is just as unusable. It
+  counts *unclassified* failures: a typed report weighs more or less than one, so a
+  captcha spends several of them and a rate limit less than one. No single report can
+  cross the threshold on its own unless you set this to `1`. See
+  [architecture.md](architecture.md#failure-accounting) for the weights.
 
 Tune both down for an aggressive target site, up if you see healthy instances being
 quarantined for transient network noise.
