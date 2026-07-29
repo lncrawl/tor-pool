@@ -10,7 +10,7 @@
 # architecture under QEMU emulation would multiply the slowest step in the
 # build for no difference in output.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:26-alpine AS web
 
 WORKDIR /web
 
