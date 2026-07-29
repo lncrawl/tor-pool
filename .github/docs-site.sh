@@ -25,10 +25,16 @@ cp -R docs/. "$out"/
 # The landing page. Its links are relative to the repo root, so the ones into
 # docs/ are siblings once staged — including the screenshots, which are <picture>
 # elements with the path in an attribute rather than a markdown link.
-sed \
-  -e 's|](docs/|](|g' \
+#
+# GitHub renders markdown inside a raw HTML block; Python-Markdown only does so
+# when told to (md_in_html), and without the marker the centred title, tagline
+# and badge row — and the contents of the collapsed config section — come out as
+# literal source.
+sed -E \
+  -e 's|\]\(docs/|](|g' \
   -e 's|"docs/|"|g' \
-  -e 's|](CHANGELOG.md)|](changelog.md)|g' \
+  -e 's|\]\(CHANGELOG\.md\)|](changelog.md)|g' \
+  -e 's@<(div|details)([^>]*)>@<\1\2 markdown="1">@g' \
   README.md > "$out/index.md"
 
 # Worth a page of its own: it is the release notes, and what the versions in
