@@ -252,9 +252,9 @@ func TestMintedTokenWorksAndRevokeIsImmediate(t *testing.T) {
 	if !strings.HasPrefix(secret, tokenPrefix) {
 		t.Errorf("secret = %q, want the %q prefix", secret, tokenPrefix)
 	}
-	// 25 characters: the prefix plus 128 bits of base64url.
-	if len(secret) != len(tokenPrefix)+22 {
-		t.Errorf("len(secret) = %d, want %d", len(secret), len(tokenPrefix)+22)
+	// 25 characters: the prefix plus 22 of base62, which is just over 128 bits.
+	if len(secret) != len(tokenPrefix)+tokenChars {
+		t.Errorf("len(secret) = %d, want %d", len(secret), len(tokenPrefix)+tokenChars)
 	}
 	if info.ID == "" || info.Name != "scraper" || info.Scope != ScopeProxy {
 		t.Errorf("info = %+v, want an id, the name and the proxy scope", info)
@@ -363,6 +363,92 @@ func TestEnvTokenWorksAndIsNotPersisted(t *testing.T) {
 	}
 	if _, err := restarted.VerifyProxy(cfg.ProxyToken); err != nil {
 		t.Errorf("PROXY_TOKEN stopped working after a restart: %v", err)
+	}
+}
+
+// A generated credential must be alphanumeric all the way through. base64url's
+// '-' and '_' are what let a token get word-broken by a terminal or half-selected
+// by a double-click and come back subtly wrong, which then presents as a refused
+// credential rather than as a mangled string.
+func TestGeneratedCredentialsAreAlphanumeric(t *testing.T) {
+	alnum := func(s string) bool {
+		for _, r := range s {
+			switch {
+			case r >= '0' && r <= '9', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+			default:
+				return false
+			}
+		}
+		return true
+	}
+
+	// Enough draws that a stray character from either alphabet shows up: base64url
+	// emits one roughly every 12 characters, so 200 tokens would be certain to.
+	for range 200 {
+		secret, err := newSecret()
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := strings.TrimPrefix(secret, tokenPrefix)
+		if len(body) != tokenChars {
+			t.Fatalf("secret body = %q, want %d characters", body, tokenChars)
+		}
+		if !alnum(body) {
+			t.Fatalf("secret %q is not alphanumeric", secret)
+		}
+
+		// The id travels in a URL path and gets copied out of the dashboard, so it
+		// is held to the same rule.
+		id, err := newID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(id) != idChars || !alnum(id) {
+			t.Fatalf("id = %q, want %d alphanumeric characters", id, idChars)
+		}
+	}
+}
+
+// Rejection sampling has to actually reject: folding a whole byte with `% 62`
+// would make the first eight characters of the alphabet ~1.6% likelier, and the
+// giveaway is that '0'..'7' then outnumber the rest. Checked as a distribution
+// because there is no other way to see a bias from outside the function.
+func TestRandomBase62IsUnbiased(t *testing.T) {
+	const draws = 60000
+
+	s, err := randomBase62(draws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[rune]int, len(base62Alphabet))
+	for _, r := range s {
+		counts[r]++
+	}
+	if len(counts) != len(base62Alphabet) {
+		t.Fatalf("saw %d distinct characters, want all %d", len(counts), len(base62Alphabet))
+	}
+
+	// The biased implementation over-represents the first eight by ~1.6%; this
+	// bound is wide enough that a fair draw will not trip it and narrow enough
+	// that the fold would. Expected count per character is draws/62 ≈ 967.
+	expected := float64(draws) / float64(len(base62Alphabet))
+	var favoured, rest float64
+	for r, n := range counts {
+		if strings.IndexRune(base62Alphabet, r) < 256%len(base62Alphabet) {
+			favoured += float64(n)
+		} else {
+			rest += float64(n)
+		}
+		if float64(n) < expected*0.8 || float64(n) > expected*1.2 {
+			t.Errorf("character %q appeared %d times, want about %.0f", r, n, expected)
+		}
+	}
+	// Per-character over the eight favoured versus the other 54.
+	favoured /= float64(256 % len(base62Alphabet))
+	rest /= float64(len(base62Alphabet) - 256%len(base62Alphabet))
+	if ratio := favoured / rest; ratio > 1.01 {
+		t.Errorf("the first bytes of the alphabet are %.1f%% likelier — the sampling folds instead of rejecting",
+			(ratio-1)*100)
 	}
 }
 
@@ -553,4 +639,81 @@ func TestVerifyIsSafeAlongsideMutations(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+// AUTH_DISABLED has to be answered at every entry point, not just the one a
+// reader happens to check. A verifier that still refused on any of these would
+// leave the pool half-open, and which half depends on which listener you use.
+func TestDisabledAuthAcceptsEveryCredentialPath(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.AuthDisabled = true
+	a, _ := open(t, &cfg)
+
+	if !a.Disabled() {
+		t.Fatal("Disabled() = false with AuthDisabled set")
+	}
+
+	for name, verify := range map[string]func(string) (Identity, error){
+		"proxy":  a.VerifyProxy,
+		"api":    a.VerifyAPI,
+		"ticket": a.VerifyTicket,
+	} {
+		// An empty credential is the case that matters: it is what a caller that
+		// was never configured with one actually sends.
+		for _, presented := range []string{"", "nonsense", "tp_notAToken"} {
+			id, err := verify(presented)
+			if err != nil {
+				t.Errorf("%s(%q) = %v, want no error", name, presented, err)
+				continue
+			}
+			// Admin, because Allows treats it as covering every scope and a
+			// disabled check must satisfy the proxy-scoped routes too.
+			if id.Scope != ScopeAdmin {
+				t.Errorf("%s(%q) scope = %q, want %q", name, presented, id.Scope, ScopeAdmin)
+			}
+			if !id.Allows(ScopeProxy) || !id.Allows(ScopeAdmin) {
+				t.Errorf("%s(%q) identity %+v does not allow both scopes", name, presented, id)
+			}
+		}
+	}
+
+	// A ticket must still be mintable without a bearer, or the dashboard's stream
+	// cannot open: the stream handler mints one before it connects.
+	if _, _, err := a.Ticket(""); err != nil {
+		t.Errorf("Ticket with no bearer = %v, want a ticket", err)
+	}
+	if _, _, err := a.Login("nobody", "wrong", "10.0.0.1"); err != nil {
+		t.Errorf("Login with wrong credentials = %v, want success", err)
+	}
+}
+
+// Turning authentication off must not throw away the credentials, or unsetting
+// the flag becomes a second setup step: no password to sign in with, and on a
+// store that is no longer fresh, no bootstrap token either.
+func TestDisabledAuthStillProvisionsCredentialsForLater(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.AuthDisabled = true
+	a, boot := open(t, &cfg)
+
+	if boot.AdminPassword == "" || boot.ProxyToken == "" {
+		t.Fatalf("boot = %+v, want both credentials generated", boot)
+	}
+	if err := a.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same data directory, with the flag cleared: what an operator sees after
+	// removing AUTH_DISABLED and restarting.
+	cfg.AuthDisabled = false
+	reopened, _ := open(t, &cfg)
+
+	if _, _, err := reopened.Login(cfg.AdminUser, boot.AdminPassword, "10.0.0.1"); err != nil {
+		t.Errorf("the password logged while auth was off does not work once it is on: %v", err)
+	}
+	if _, err := reopened.VerifyProxy(boot.ProxyToken); err != nil {
+		t.Errorf("the bootstrap token logged while auth was off is not accepted: %v", err)
+	}
+	if _, err := reopened.VerifyProxy("tp_definitelyNotTheToken"); err == nil {
+		t.Error("clearing AUTH_DISABLED left the pool open")
+	}
 }
