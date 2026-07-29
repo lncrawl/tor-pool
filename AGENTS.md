@@ -65,6 +65,9 @@ docs/              configuration, api, architecture, operations, scraper, develo
   negative tests.
 - **Docs must not restate tuning numbers.** Name the constant or file that holds the value
   (`internal/config`) rather than copying it into prose that will rot.
+- **Markdown links stay repo-relative.** `docs/` and the README are also published as a site
+  (`docs.yml`, see `docs/development.md`); staging rewrites the links, and a build with
+  `strict: true` fails the PR if one resolves nowhere.
 
 ## Invariants
 

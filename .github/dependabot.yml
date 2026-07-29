@@ -26,3 +26,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+
+  # requirements-docs.txt — the pinned mkdocs toolchain the docs workflow builds
+  # with. Nothing here reaches the image.
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

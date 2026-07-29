@@ -1,0 +1,4 @@
+# Pinned so a docs build is reproducible and an upstream release cannot break
+# `main` on its own; dependabot proposes the bumps.
+mkdocs-material==9.7.7
+markdown-callouts==0.4.0

@@ -11,6 +11,11 @@ node_modules/
 web/.vite/
 *.tsbuildinfo
 
+# Docs site: .docs-site is staged from README.md and docs/ by
+# .github/docs-site.sh, site/ is what mkdocs builds from it.
+/.docs-site/
+/site/
+
 # Environment / secrets
 .env
 *.env.local

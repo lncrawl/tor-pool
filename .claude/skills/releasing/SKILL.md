@@ -18,6 +18,7 @@ was the image most people pulled.
 | `rebuild.yml` | Mondays 02:00 UTC, or dispatch | `edge`; `latest`, `X.Y`, `X` | unchanged |
 | `build-image.yml` | called by all three | — | — |
 | `verify-image.yml` | called by CI and the rebuild | — | — |
+| `docs.yml` | push to `main` or a PR touching docs | the GitHub Pages site | — |
 
 `build-image.yml` is a `workflow_call` reusable workflow holding *how* the image is built
 (QEMU, buildx, platforms, cache, GHCR login). The callers decide only what it is called,
@@ -104,6 +105,18 @@ changed is underneath it, recorded in the image's `org.opencontainers.image.crea
 and its digest. A rebuild therefore produces a new digest even when no package changed, so
 pin `X.Y.Z` or a digest if byte-stability matters. A failed scheduled run notifies whoever
 last touched the workflow file; if `latest` looks stale, check `rebuild.yml`'s history first.
+
+## The docs site
+
+`docs.yml` publishes `docs/` — with `README.md` as the landing page and `CHANGELOG.md` as a
+page — to GitHub Pages. It is not tied to a version: the site tracks `main`, so a
+documentation fix reaches readers without a tag, which is the whole reason it is a separate
+workflow from the image ones. `.github/docs-site.sh` stages the sources and rewrites the
+repo-relative links; `mkdocs` runs with `strict: true`, so a link that resolves on GitHub but
+not on the site fails the PR. Pull requests build without deploying.
+
+The Pages source must be set to **GitHub Actions** in the repo settings once; until it is, the
+build passes and only the deploy job fails.
 
 ## What is deliberately not automated
 

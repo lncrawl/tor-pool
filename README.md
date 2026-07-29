@@ -7,6 +7,7 @@
 [![CI](https://github.com/lncrawl/tor-pool/actions/workflows/ci.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/ci.yml)
 [![Release](https://github.com/lncrawl/tor-pool/actions/workflows/release.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/release.yml)
 [![CodeQL](https://github.com/lncrawl/tor-pool/actions/workflows/codeql.yml/badge.svg)](https://github.com/lncrawl/tor-pool/actions/workflows/codeql.yml)
+[![Docs](https://github.com/lncrawl/tor-pool/actions/workflows/docs.yml/badge.svg)](https://lncrawl.github.io/tor-pool/)
 [![License](https://img.shields.io/github/license/lncrawl/tor-pool)](LICENSE)
 
 </div>
@@ -280,6 +281,8 @@ Full reference with examples: [docs/api.md](docs/api.md).
   fingerprint, your cookies, or what you send.
 
 ## Docs
+
+Also published, searchable, at **[lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)**.
 
 [Configuration](docs/configuration.md) ·
 [API](docs/api.md) ·

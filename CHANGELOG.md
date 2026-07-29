@@ -7,6 +7,19 @@ All notable changes are documented here. The format is based on
 `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag
 means.
 
+## [Unreleased]
+
+### Added
+
+- **The documentation is published at
+  [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)** — `docs/` with the
+  README as its landing page and this changelog as a page, searchable, built by `docs.yml`
+  on every push to `main` that touches them. No second copy of anything: the markdown stays
+  written for GitHub and `.github/docs-site.sh` rewrites the repo-relative links while
+  staging it. The site tracks `main` rather than a release, so a documentation fix needs no
+  tag, and a pull request builds it without deploying — with `strict: true`, so a link that
+  resolves in neither the repo nor the site fails there rather than shipping.
+
 ## [0.3.0] - 2026-07-30
 
 ### Added

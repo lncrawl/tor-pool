@@ -1,0 +1,90 @@
+name: Docs
+
+# Publishes docs/ — plus the README as its landing page — to
+# https://lncrawl.github.io/tor-pool/.
+#
+# Separate from the image workflows on purpose: a documentation fix is not a
+# release and must not touch a tag, and `publish-edge.yml` ignores markdown for
+# the same reason in reverse.
+#
+# A pull request builds but does not deploy. That build is the check: mkdocs runs
+# with strict: true, so a link that resolves on GitHub but not on the site fails
+# here rather than shipping broken.
+#
+# One-time repo setting: Settings → Pages → Source = GitHub Actions. Without it
+# the deploy job fails with "Pages site not found" and the build still passes.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Duplicated below because Actions does not support YAML anchors. Keep the
+    # two lists identical: a path only in the push list deploys without ever
+    # having been checked on a PR.
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'mkdocs.yml'
+      - '.github/docs-site.sh'
+      - '.github/requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'mkdocs.yml'
+      - '.github/docs-site.sh'
+      - '.github/requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+
+# Pages allows one deployment at a time, and cancelling one mid-upload is what
+# leaves the site half-published — so a newer run queues instead of superseding.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: .github/requirements-docs.txt
+
+      - run: pip install -r .github/requirements-docs.txt
+
+      - name: Stage the site sources
+        run: ./.github/docs-site.sh
+
+      - name: Build
+        run: mkdocs build
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    # Nothing to deploy from a fork's pull request, and no token to do it with.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

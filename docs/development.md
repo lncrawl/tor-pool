@@ -49,6 +49,24 @@ commit the build output over it: the real `index.html` references a hashed asset
 not tracked, so a binary built from it serves a broken page. `git checkout
 internal/server/dist/index.html` after building locally.
 
+## Docs
+
+These pages are published at [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)
+by `docs.yml`, with the README as the landing page. To see a change the way a reader will:
+
+```bash
+pip install -r .github/requirements-docs.txt
+.github/docs-site.sh          # stage README.md + docs/ into .docs-site/
+mkdocs serve                  # http://127.0.0.1:8000
+```
+
+`mkdocs serve` watches `.docs-site/`, not the sources it was staged from, so re-run the
+script after every edit — including to `docs/` pages, which are copies there.
+
+Write links for GitHub — repo-relative, as the existing pages do. Staging rewrites the ones
+into `docs/` to site pages and the rest to the repo, and `mkdocs` builds with `strict: true`,
+so a link that resolves in neither place fails the pull request instead of shipping.
+
 ## Gotchas
 
 - **`networkidle` never fires.** The dashboard holds an SSE connection open for its

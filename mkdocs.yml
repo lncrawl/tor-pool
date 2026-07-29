@@ -1,0 +1,81 @@
+site_name: tor-pool
+site_description: A pool of Tor exits behind one sticky endpoint — that heals itself when an exit gets blocked.
+site_url: https://lncrawl.github.io/tor-pool/
+repo_url: https://github.com/lncrawl/tor-pool
+repo_name: lncrawl/tor-pool
+copyright: MIT licensed
+
+# Not docs/ — the pages are staged there by .github/docs-site.sh, which adds the
+# README as the landing page and rewrites the repo-relative links in it.
+docs_dir: .docs-site
+site_dir: site
+
+# A link that resolves in the repo but not on the site is otherwise a warning
+# nobody reads. Strict makes it fail the build, on the PR that introduced it.
+strict: true
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    # The screenshots are <picture> elements keyed on prefers-color-scheme, so
+    # the default follows the OS and the toggles are an override from there.
+    - media: '(prefers-color-scheme)'
+      toggle:
+        icon: material/brightness-auto
+        name: Follow the system theme
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light
+  features:
+    - content.code.copy
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - toc.follow
+
+nav:
+  - Overview: index.md
+  - Configuration: configuration.md
+  - API: api.md
+  - Architecture: architecture.md
+  - Operations: operations.md
+  - Using it from scraper: scraper.md
+  - Development: development.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  # The README's screenshots are <picture> blocks; without this they are
+  # emitted as escaped text.
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  # Renders GitHub's `> [!WARNING]` blockquotes as admonitions instead of
+  # leaking the marker into the page.
+  - github-callouts
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+plugins:
+  - search
