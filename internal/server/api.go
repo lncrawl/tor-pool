@@ -505,9 +505,10 @@ func (s *Server) handleSessionDrop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	limit := 200
+	const maxEventsLimit = 200
+	limit := maxEventsLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= maxEventsLimit {
 			limit = n
 		}
 	}
