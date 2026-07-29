@@ -92,6 +92,12 @@ jobs:
             exit 1
           fi
 
+          echo "== the status endpoint must report that a credential is needed =="
+          curl -sf http://127.0.0.1:8080/api/auth/status | grep -q '"required"[[:space:]]*:[[:space:]]*true' || {
+            echo "/api/auth/status did not report required:true"
+            exit 1
+          }
+
           echo "== sign in and read the pool =="
           # Responses are indented JSON, so the pattern has to tolerate the
           # whitespace around the colon — without it this silently extracts
@@ -106,6 +112,59 @@ jobs:
           fi
           curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:8080/api/instances
 
+      # The mirror image of the negative assertion above, and the only end-to-end
+      # proof that the escape hatch actually opens the door. Asserting it in Go
+      # tests only would leave the container free to ignore the variable — a
+      # missing passthrough in the entrypoint looks exactly like a closed pool.
+      #
+      # No wait for /health: the API listener is up before the fleet finishes
+      # bootstrapping, and none of these routes needs a routable instance. That is
+      # what keeps this from costing a second two-minute boot.
+      - name: A pool with AUTH_DISABLED must answer without a credential
+        run: |
+          set -euo pipefail
+
+          docker run -d --name torpool-open \
+            -e POOL_SIZE=1 -e AUTH_DISABLED=true \
+            -p 127.0.0.1:8081:8080 \
+            tor-pool:ci
+
+          up=false
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8081/api/auth/status >/dev/null 2>&1; then
+              up=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$up" != true ]; then
+            echo "the API never answered"
+            docker logs torpool-open
+            exit 1
+          fi
+
+          curl -sf http://127.0.0.1:8081/api/auth/status | grep -q '"required"[[:space:]]*:[[:space:]]*false' || {
+            echo "/api/auth/status did not report required:false"
+            exit 1
+          }
+
+          echo "== /api/instances must be answered with no credential =="
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/instances)
+          if [ "$code" != "200" ]; then
+            echo "expected 200, got $code — AUTH_DISABLED did not reach the server"
+            docker logs torpool-open
+            exit 1
+          fi
+
+          # The banner is the only thing standing between this flag and an
+          # operator who forgot they set it, so it has to actually be printed.
+          docker logs torpool-open 2>&1 | grep -q 'AUTHENTICATION IS DISABLED' || {
+            echo "the startup banner did not warn that authentication is off"
+            exit 1
+          }
+
       - name: Container logs
         if: always()
-        run: docker logs torpool-ci || true
+        run: |
+          docker logs torpool-ci || true
+          docker logs torpool-open || true

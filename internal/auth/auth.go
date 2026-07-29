@@ -2,11 +2,17 @@
 // JWT it is exchanged for, the short-lived ticket that carries it onto the SSE
 // stream, and the tokens that authorise proxy traffic and API calls.
 //
-// There is deliberately no setting that turns authentication off. An escape
-// hatch is the one setting an operator finds and enables, and it would make
-// every guarantee here conditional. Tests substitute their own verifier through
-// the one-method interfaces that internal/proxy and internal/server declare for
-// themselves, so the disabled path is unreachable from configuration.
+// AUTH_DISABLED turns all of it off, for a pool reachable only from the machine
+// it runs on. Every guarantee in this package is therefore conditional on that
+// flag being unset, which is why the disabled path is one branch at the top of
+// each Verify method rather than a permissive verifier injected somewhere: the
+// condition has to be visible at every point it applies, and reading any of them
+// has to be enough to know the whole story.
+//
+// The flag is answered once, in Disabled, and the listeners ask before they
+// challenge — a credential check that simply always returned nil would not be
+// enough, because SOCKS5 refuses a client offering no authentication method and
+// the HTTP proxy answers 407 before it looks at anything.
 package auth
 
 import (
@@ -96,11 +102,23 @@ type Bootstrap struct {
 // Any reports whether anything was generated and needs showing.
 func (b Bootstrap) Any() bool { return b.AdminPassword != "" || b.ProxyToken != "" }
 
+// anonymous is who every caller is when authentication is disabled.
+//
+// Admin scope, because a disabled check has to satisfy both scopes and Allows
+// treats admin as covering everything. The name is what the audit log and the
+// dashboard show, and it is deliberately not a real account: nothing was
+// verified, and a display name of "admin" would imply otherwise.
+var anonymous = Identity{Name: "anonymous", Scope: ScopeAdmin}
+
 // Auth verifies credentials and issues them.
 type Auth struct {
 	store  *store
 	events *stats.EventLog
 	log    *slog.Logger
+
+	// disabled is AUTH_DISABLED. Read on the hot path, so it stays a plain field
+	// set once in Open and never written again.
+	disabled bool
 
 	// index is an immutable map, replaced wholesale on every change so that
 	// verification never takes a lock. Invariant 14: nothing on a request path
@@ -142,6 +160,7 @@ func Open(cfg *config.Config, events *stats.EventLog, log *slog.Logger) (*Auth, 
 		store:     st,
 		events:    events,
 		log:       log,
+		disabled:  cfg.AuthDisabled,
 		loginTTL:  cfg.LoginTTL,
 		adminUser: cfg.AdminUser,
 		logins:    newLimiter(cfg.LoginRateLimit, time.Minute, maxLoginKeys),
@@ -232,8 +251,27 @@ func Open(cfg *config.Config, events *stats.EventLog, log *slog.Logger) (*Auth, 
 	}
 	st.read(a.reindex)
 
+	if a.disabled {
+		// Credentials are still resolved and still generated above, on purpose.
+		// Skipping that would make unsetting AUTH_DISABLED a second setup step —
+		// no admin password to log in with and, on a store that is no longer
+		// fresh, no bootstrap token either. They sit unused instead, and the
+		// startup banner says as much.
+		a.log.Warn("authentication is disabled by AUTH_DISABLED",
+			"proxy", "any connection is accepted",
+			"api", "any request is answered")
+		a.event("authentication disabled",
+			"AUTH_DISABLED is set; the proxy and the API accept any caller")
+	}
+
 	return a, boot, nil
 }
+
+// Disabled reports whether AUTH_DISABLED switched every check off.
+//
+// The listeners need this and not just a permissive check: they challenge before
+// they verify, and a challenge nobody can answer is still a closed door.
+func (a *Auth) Disabled() bool { return a.disabled }
 
 // Run flushes last-use stamps on a ticker until ctx is cancelled.
 //
@@ -275,6 +313,9 @@ func (a *Auth) Flush() error {
 // to move bytes, and keeping the two apart means a browser session cannot be
 // replayed onto the proxy port.
 func (a *Auth) VerifyProxy(secret string) (Identity, error) {
+	if a.disabled {
+		return anonymous, nil
+	}
 	t := a.lookup(secret)
 	if t == nil {
 		return Identity{}, ErrUnauthorized
@@ -299,6 +340,9 @@ func (a *Auth) CheckProxy(secret string) error {
 // which would misclassify anything with two dots and report whichever error was
 // less wrong.
 func (a *Auth) VerifyAPI(bearer string) (Identity, error) {
+	if a.disabled {
+		return anonymous, nil
+	}
 	if looksLikeToken(bearer) {
 		return a.VerifyProxy(bearer)
 	}
@@ -317,6 +361,9 @@ func (a *Auth) VerifyAPI(bearer string) (Identity, error) {
 // this, and VerifyAPI refuses audStream, so the returned scope is never consulted
 // for an authorisation decision.
 func (a *Auth) VerifyTicket(ticket string) (Identity, error) {
+	if a.disabled {
+		return anonymous, nil
+	}
 	c, err := verifyJWT(a.jwtKey, ticket, audStream, a.adminUser, a.pv)
 	if err != nil {
 		return Identity{}, err
@@ -326,6 +373,14 @@ func (a *Auth) VerifyTicket(ticket string) (Identity, error) {
 
 // Login exchanges the operator's credentials for an API JWT and its expiry.
 func (a *Auth) Login(user, password, remote string) (token string, expires time.Time, err error) {
+	if a.disabled {
+		// Succeeds whatever was posted, and is not rate limited: there is no
+		// secret to guess, so a limiter would only lock an operator out of an
+		// endpoint that refuses nobody. The dashboard skips the screen entirely,
+		// but a script that logs in must not get a 401 from a pool advertising
+		// that it needs no credential.
+		return a.issue(a.adminUser, remote)
+	}
 	if blocked, retry := a.logins.blocked(remote); blocked {
 		a.event("login refused, too many attempts", remote)
 		return "", time.Time{}, fmt.Errorf("%w: retry in %s", ErrRateLimited, retry.Round(time.Second))
@@ -346,12 +401,17 @@ func (a *Auth) Login(user, password, remote string) (token string, expires time.
 		return "", time.Time{}, ErrUnauthorized
 	}
 	a.logins.succeed(remote)
+	return a.issue(a.adminUser, remote)
+}
 
+// issue signs an API JWT for a caller whose credentials have already been
+// settled, one way or the other.
+func (a *Auth) issue(sub, remote string) (token string, expires time.Time, err error) {
 	now := time.Now()
 	expires = now.Add(a.loginTTL)
 	token, err = signJWT(a.jwtKey, claims{
 		Iss: jwtIssuer,
-		Sub: a.adminUser,
+		Sub: sub,
 		Aud: audAPI,
 		Iat: now.Unix(),
 		Exp: expires.Unix(),
@@ -370,14 +430,18 @@ func (a *Auth) Ticket(bearer string) (ticket string, ttl time.Duration, err erro
 	// captured one renews itself indefinitely and its lifetime means nothing. A
 	// token is refused too: a programmatic caller can read /api/stream with its
 	// own header and has no need for a URL credential.
-	c, err := verifyJWT(a.jwtKey, bearer, audAPI, a.adminUser, a.pv)
-	if err != nil {
-		return "", 0, err
+	sub := a.adminUser
+	if !a.disabled {
+		c, err := verifyJWT(a.jwtKey, bearer, audAPI, a.adminUser, a.pv)
+		if err != nil {
+			return "", 0, err
+		}
+		sub = c.Sub
 	}
 	now := time.Now()
 	ticket, err = signJWT(a.jwtKey, claims{
 		Iss: jwtIssuer,
-		Sub: c.Sub,
+		Sub: sub,
 		Aud: audStream,
 		Iat: now.Unix(),
 		Exp: now.Add(ticketTTL).Unix(),

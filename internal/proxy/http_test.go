@@ -25,15 +25,25 @@ type fakeRouter struct {
 
 	mu       sync.Mutex
 	routes   int
+	keys     []string
 	finished []Outcome
 	failures []string
 }
 
-func (r *fakeRouter) RouteAddr(string) (int, string, error) {
+func (r *fakeRouter) RouteAddr(key string) (int, string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.routes++
+	r.keys = append(r.keys, key)
 	return 0, r.addr, nil
+}
+
+// sessionKeys is what each request was routed under, which is how a test proves
+// a caller kept its stickiness.
+func (r *fakeRouter) sessionKeys() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.keys...)
 }
 
 func (r *fakeRouter) Finish(_ string, out Outcome) {
@@ -132,6 +142,16 @@ func serveFakeTor(conn net.Conn) {
 func newProxyServer(t *testing.T, router Router) *Server {
 	t.Helper()
 	cfg := config.Defaults()
+	return NewServer(&cfg, router, acceptToken, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// newOpenProxyServer is newProxyServer with AUTH_DISABLED set. The verifier is
+// still supplied, exactly as the binary supplies it, so the test covers the
+// listener consulting the flag rather than a server built without a verifier.
+func newOpenProxyServer(t *testing.T, router Router) *Server {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.AuthDisabled = true
 	return NewServer(&cfg, router, acceptToken, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -234,6 +254,61 @@ func TestHTTPProxyRefusesRequestsWithoutACredential(t *testing.T) {
 	if routes != 0 || finished != 0 || failures != 0 {
 		t.Errorf("routed %d, finished %d, failures %d — a refused request must touch no instance",
 			routes, finished, failures)
+	}
+}
+
+// With AUTH_DISABLED a request with no Proxy-Authorization must be served rather
+// than challenged. A 407 here would be unanswerable: the operator turned auth off
+// precisely so there would be no credential to send.
+func TestHTTPProxyServesWithoutACredentialWhenDisabled(t *testing.T) {
+	router := &fakeRouter{addr: fakeTor(t)}
+	s := newOpenProxyServer(t, router)
+
+	client, server := newClientServer(t)
+	go s.handleHTTP(context.Background(), server)
+
+	fmt.Fprint(client, "GET http://alpha.example/one HTTP/1.1\r\nHost: alpha.example\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "served alpha.example/one" {
+		t.Errorf("body = %q", body)
+	}
+}
+
+// A caller that keeps sending its old credential must keep its session. The
+// password is ignored, but the username beside it is the session key, and losing
+// it would move every caller onto one exit IP.
+func TestHTTPProxyKeepsTheSessionKeyWhenDisabled(t *testing.T) {
+	router := &fakeRouter{addr: fakeTor(t)}
+	s := newOpenProxyServer(t, router)
+
+	client, server := newClientServer(t)
+	go s.handleHTTP(context.Background(), server)
+
+	// A password the verifier would refuse, to prove it is never consulted.
+	header := "Proxy-Authorization: Basic " +
+		base64.StdEncoding.EncodeToString([]byte("sess-a:stale-token")) + "\r\n"
+	fmt.Fprintf(client, "GET http://alpha.example/one HTTP/1.1\r\nHost: alpha.example\r\n%s\r\n", header)
+
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if keys := router.sessionKeys(); len(keys) != 1 || keys[0] != "sess-a" {
+		t.Errorf("routed under %v, want [sess-a]", keys)
 	}
 }
 

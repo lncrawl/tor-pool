@@ -98,6 +98,9 @@ func run() error {
 		return fmt.Errorf("open credential store: %w", err)
 	}
 	reportBootstrap(&cfg, boot)
+	// Last, so it is the final thing in the startup log rather than something
+	// scrolled past.
+	reportAuthDisabled(&cfg)
 
 	// Registered after the fleet's shutdown so that it runs before it: defers are
 	// LIFO, and a slow tor exit would otherwise eat the flush window.
@@ -182,9 +185,55 @@ func reportBootstrap(cfg *config.Config, boot auth.Bootstrap) {
 		b.WriteString("               set PROXY_TOKEN to choose your own instead\n")
 	}
 
+	if cfg.AuthDisabled {
+		// They were still generated, so that clearing the flag is a restart and
+		// not a fresh round of provisioning. Say plainly that they do nothing yet,
+		// or this block reads as a pool that is asking for credentials it is not.
+		b.WriteString("\n  AUTH_DISABLED is set, so nothing above is being checked yet.\n")
+		b.WriteString("  These are what will work once you unset it and restart.\n")
+	}
+
 	fmt.Fprintf(&b, "\n  Stored in %s\n", cfg.DataDir)
 	b.WriteString("  Mount that path as a volume, or they are regenerated whenever the\n")
 	b.WriteString("  container is recreated.\n")
+	fmt.Fprintf(&b, "%s\n\n", rule)
+
+	_, _ = os.Stderr.WriteString(b.String())
+}
+
+// reportAuthDisabled says loudly that every credential check is off.
+//
+// A warning line through slog is not enough here. It scrolls past among the
+// instance bootstrap chatter, and the whole risk of this flag is an operator who
+// set it on a laptop months ago and no longer remembers it is set — by which time
+// the only place it is written down is the environment. Same stderr block as the
+// credential banner, for the same reason: it has to be impossible to miss in
+// `docker logs`.
+func reportAuthDisabled(cfg *config.Config) {
+	if !cfg.AuthDisabled {
+		return
+	}
+
+	rule := strings.Repeat("=", 74)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n%s\n", rule)
+	b.WriteString("  AUTHENTICATION IS DISABLED (AUTH_DISABLED)\n\n")
+	b.WriteString("  Every proxy connection and every API request is accepted with no\n")
+	b.WriteString("  credential. Anyone who can reach these ports has your Tor bandwidth,\n")
+	b.WriteString("  the session table, and the ability to restart instances.\n")
+	fmt.Fprintf(&b, "\n  Reachable on %s:", cfg.BindHost)
+	if cfg.SocksPort != 0 {
+		fmt.Fprintf(&b, " socks %d", cfg.SocksPort)
+	}
+	if cfg.HTTPPort != 0 {
+		fmt.Fprintf(&b, " · http %d", cfg.HTTPPort)
+	}
+	fmt.Fprintf(&b, " · api %d\n", cfg.APIPort)
+	// Naming the publish rather than BIND_HOST on purpose: in a container the
+	// bind is 0.0.0.0 by necessity, so it is the host-side mapping that decides
+	// who can actually connect, and that is what an operator has to go and check.
+	b.WriteString("  Only safe if the host publishes these to 127.0.0.1. Unset the\n")
+	b.WriteString("  variable and restart to turn checking back on.\n")
 	fmt.Fprintf(&b, "%s\n\n", rule)
 
 	_, _ = os.Stderr.WriteString(b.String())

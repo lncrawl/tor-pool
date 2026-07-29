@@ -83,6 +83,22 @@ func writeUnauthorized(w http.ResponseWriter, err error) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
+// authStatus tells an unauthenticated client what it is dealing with.
+type authStatus struct {
+	// Required is false when AUTH_DISABLED is set. The dashboard renders its app
+	// directly rather than a sign-in screen, and a scripted caller can tell a
+	// deliberately open pool from one whose credential it has got wrong.
+	Required bool `json:"required"`
+	// User is the operator name the login endpoint expects, so the sign-in form
+	// can prefill it instead of guessing "admin" when ADMIN_USER says otherwise.
+	// Not a secret: it is half of a credential whose other half is the point.
+	User string `json:"user"`
+}
+
+func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, authStatus{Required: !s.auth.Disabled(), User: s.cfg.AdminUser})
+}
+
 // loginRequest is what the login screen posts.
 type loginRequest struct {
 	User     string `json:"user"`

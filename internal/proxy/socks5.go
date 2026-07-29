@@ -110,6 +110,12 @@ func readSocksRequest(conn net.Conn, verify credentialCheck) (socksRequest, erro
 // and RFC 1928 already requires the client to close on 0xFF. Real clients are
 // unaffected: curl, httpx and requests all offer both methods when the proxy URL
 // carries credentials.
+//
+// A nil verify is AUTH_DISABLED, and only then is "no authentication" selected.
+// Username/password is still preferred whenever the client offers it, because the
+// username is the session key and dropping to 0x00 would silently discard the
+// caller's stickiness — the sessions would all collapse onto DEFAULT_SESSION and
+// look like a routing bug rather than a consequence of turning auth off.
 func negotiateAuth(conn net.Conn, verify credentialCheck) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
@@ -129,6 +135,15 @@ func negotiateAuth(conn net.Conn, verify credentialCheck) (string, error) {
 	}
 
 	if !slices.Contains(methods, authUserPass) {
+		if verify == nil {
+			// No sub-negotiation follows 0x00, so the CONNECT request is next and
+			// there is no username to read. The session key is empty, which means
+			// DEFAULT_SESSION — the same thing a caller who omits one gets today.
+			if _, err := conn.Write([]byte{socks5Version, authNone}); err != nil {
+				return "", fmt.Errorf("write method selection: %w", err)
+			}
+			return "", nil
+		}
 		_, _ = conn.Write([]byte{socks5Version, authNoAcceptable})
 		return "", errors.New("client did not offer username/password authentication")
 	}
@@ -140,6 +155,10 @@ func negotiateAuth(conn net.Conn, verify credentialCheck) (string, error) {
 
 // readUserPass reads an RFC 1929 sub-negotiation, verifies the password, and
 // returns the username as the session key.
+//
+// A nil verify skips only the verification. The sub-negotiation is still read and
+// still answered, because the client is waiting on a status byte and will not send
+// its CONNECT request without one.
 func readUserPass(conn net.Conn, verify credentialCheck) (string, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
@@ -163,6 +182,16 @@ func readUserPass(conn net.Conn, verify credentialCheck) (string, error) {
 	password := make([]byte, int(plen[0]))
 	if _, err := io.ReadFull(conn, password); err != nil {
 		return "", fmt.Errorf("read password: %w", err)
+	}
+
+	if verify == nil {
+		// AUTH_DISABLED. The sub-negotiation still has to be answered — the
+		// client is waiting on a status byte and will not send CONNECT without
+		// one — so the password is read and dropped rather than never asked for.
+		if _, err := conn.Write([]byte{userPassVersion, userPassSuccess}); err != nil {
+			return "", fmt.Errorf("write auth reply: %w", err)
+		}
+		return string(username), nil
 	}
 
 	if err := verify(string(password)); err != nil {

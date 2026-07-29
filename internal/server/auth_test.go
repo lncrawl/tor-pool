@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/lncrawl/tor-pool/internal/auth"
+	"github.com/lncrawl/tor-pool/internal/config"
 )
 
 // publicPaths is the complete set of endpoints that may answer without a
@@ -18,9 +19,10 @@ import (
 // being named, which makes forgetting a scope a test failure rather than a
 // silently open endpoint.
 var publicPaths = map[string]string{
-	"/health":         "probed by the container healthcheck and by CI",
-	"/metrics":        "scraped on a trusted network",
-	"/api/auth/login": "has to be reachable to be useful; rate limited instead",
+	"/health":          "probed by the container healthcheck and by CI",
+	"/metrics":         "scraped on a trusted network",
+	"/api/auth/login":  "has to be reachable to be useful; rate limited instead",
+	"/api/auth/status": "the dashboard must know whether to ask for a credential",
 }
 
 // The reason the route table is data. Registered one HandleFunc at a time,
@@ -340,6 +342,130 @@ func TestPoolViewNeverLeaksCredentials(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(body), "password") {
 		t.Errorf("/api/pool mentions a password: %s", body)
+	}
+}
+
+// newOpenTestServer is a server with AUTH_DISABLED set.
+func newOpenTestServer(t *testing.T) *testServer {
+	t.Helper()
+	return newTestServerWith(t, func(cfg *config.Config) { cfg.AuthDisabled = true })
+}
+
+// The status endpoint is the only way the dashboard can tell an open pool from
+// one whose stored session has expired, so it has to be right in both directions.
+func TestAuthStatusReportsWhetherACredentialIsNeeded(t *testing.T) {
+	for name, tc := range map[string]struct {
+		server *testServer
+		want   bool
+	}{
+		"enabled":  {newTestServer(t), true},
+		"disabled": {newOpenTestServer(t), false},
+	} {
+		rec := doAs(t, tc.server, "", http.MethodGet, "/api/auth/status", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: /api/auth/status = %d, want 200", name, rec.Code)
+		}
+		var got authStatus
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%s: decode: %v", name, err)
+		}
+		if got.Required != tc.want {
+			t.Errorf("%s: required = %v, want %v", name, got.Required, tc.want)
+		}
+		if got.User != "admin" {
+			t.Errorf("%s: user = %q, want the configured ADMIN_USER", name, got.User)
+		}
+		if strings.Contains(rec.Body.String(), testPassword) {
+			t.Errorf("%s: the status endpoint leaked the password", name)
+		}
+	}
+}
+
+// AUTH_DISABLED has to reach every guarded route, including the ones that verify
+// again inside the handler rather than relying on the route's scope. Walking the
+// table means a route added later cannot quietly stay closed.
+func TestDisabledAuthOpensEveryRoute(t *testing.T) {
+	s := newOpenTestServer(t)
+	for _, rt := range s.routes() {
+		if rt.need == "" {
+			continue
+		}
+		method := rt.method
+		if method == "" {
+			method = http.MethodGet
+		}
+		path := strings.NewReplacer("{id}", "0", "{key}", "somekey").Replace(rt.path)
+		// The stream would block on a flush loop, and it is covered below.
+		if path == "/api/stream" {
+			continue
+		}
+		body := ""
+		if path == "/api/tokens" && method == http.MethodPost {
+			body = `{"name":"open","scope":"proxy"}`
+		}
+
+		rec := doAs(t, s, "", method, path, body)
+		if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+			t.Errorf("%s %s = %d with AUTH_DISABLED, want the handler to run",
+				method, path, rec.Code)
+		}
+	}
+}
+
+// The trap this guards: the stream verifies its ticket inside the handler, so a
+// permissive route guard alone would still leave the dashboard unable to connect
+// — and the reconnect loop would spin on a mint that never succeeds.
+func TestDisabledAuthLetsTheStreamOpenWithoutATicket(t *testing.T) {
+	s := newOpenTestServer(t)
+
+	if rec := doAs(t, s, "", http.MethodPost, "/api/auth/ticket", ""); rec.Code != http.StatusOK {
+		t.Errorf("minting a ticket with no credential = %d, want 200", rec.Code)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := newRequest(http.MethodGet, "/api/stream", "").WithContext(ctx)
+	done := make(chan int, 1)
+	go func() {
+		rec := serve(s, req)
+		done <- rec.Code
+	}()
+	// The handler holds the connection open, so cancelling is how it returns.
+	cancel()
+	if code := <-done; code == http.StatusUnauthorized {
+		t.Error("/api/stream refused an anonymous caller with AUTH_DISABLED")
+	}
+}
+
+// A caller that still sends a credential must not be worse off than one that
+// sends none: a scraper pointed at a pool whose auth was switched off keeps its
+// old configuration, and a token that suddenly 401s would look like a revocation.
+func TestDisabledAuthStillAcceptsRealCredentials(t *testing.T) {
+	s := newOpenTestServer(t)
+	for name, bearer := range map[string]string{
+		"operator jwt": s.jwt,
+		"proxy token":  s.token,
+		"nonsense":     "not-a-credential",
+	} {
+		if code := doAs(t, s, bearer, http.MethodGet, "/api/pool", "").Code; code != http.StatusOK {
+			t.Errorf("%s = %d, want 200", name, code)
+		}
+	}
+}
+
+// A pool that needs no credential must not answer 401 to a login, or a script
+// that signs in before it works has no way to proceed.
+func TestDisabledAuthLoginSucceedsWithAnything(t *testing.T) {
+	s := newOpenTestServer(t)
+	rec := doAs(t, s, "", http.MethodPost, "/api/auth/login", `{"user":"nobody","password":"wrong"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var got loginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Token == "" {
+		t.Error("login issued no token")
 	}
 }
 

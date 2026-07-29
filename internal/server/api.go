@@ -1,11 +1,16 @@
 // Package server exposes the pool over HTTP: a REST API, an SSE stream for
 // live updates, Prometheus metrics, and the embedded dashboard.
 //
-// Everything under /api/ requires a credential; /health, /metrics, the login
-// endpoint and the dashboard's static assets do not. Authentication is a Bearer
-// header and never a cookie, which is what makes the mutating endpoints immune
-// to cross-site requests — there is no CSRF defence here, and none is needed as
-// long as that holds.
+// Everything under /api/ requires a credential; /health, /metrics, the login and
+// status endpoints and the dashboard's static assets do not. Authentication is a
+// Bearer header and never a cookie, which is what makes the mutating endpoints
+// immune to cross-site requests — there is no CSRF defence here, and none is
+// needed as long as that holds.
+//
+// AUTH_DISABLED removes the requirement everywhere at once. The route table still
+// declares a scope for every endpoint and the guard still runs; it is
+// internal/auth that stops refusing, so there is no second, unguarded code path
+// that could drift out of step with this one.
 //
 // It is still not a substitute for TLS. Passwords, JWTs and tokens all cross the
 // wire in cleartext, so publishing this port beyond loopback needs something in
@@ -76,6 +81,10 @@ func (s *Server) routes() []route {
 		{method: "GET", path: "/health", handler: s.handleHealth},
 		{method: "GET", path: "/metrics", handler: s.handleMetrics},
 		{method: "POST", path: "/api/auth/login", handler: s.handleLogin},
+		// Public because the dashboard has to know whether to render a sign-in
+		// screen before it has anything to sign in with. It leaks nothing: the
+		// same answer falls out of any request, as a 401 or a 200.
+		{method: "GET", path: "/api/auth/status", handler: s.handleAuthStatus},
 
 		{method: "POST", path: "/api/auth/ticket", need: auth.ScopeAdmin, handler: s.handleTicket},
 

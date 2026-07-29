@@ -151,6 +151,14 @@ export interface LoginResult {
   user: string;
 }
 
+/** AuthStatus is what a client can learn before it has a credential. */
+export interface AuthStatus {
+  /** False when the pool runs with AUTH_DISABLED and checks nothing. */
+  required: boolean;
+  /** The operator name the login endpoint expects, for prefilling the form. */
+  user: string;
+}
+
 export interface Ticket {
   ticket: string;
   expires_in: number;
@@ -214,6 +222,21 @@ export const api = {
       throw new Error((await res.text()).trim() || `${res.status} ${res.statusText}`);
     }
     return (await res.json()) as LoginResult;
+  },
+
+  /**
+   * authStatus asks whether a credential is needed at all.
+   *
+   * Its own fetch rather than request(), for the same reason login has one: it
+   * runs before there is a session, so a 401 here must not be read as an existing
+   * session dying and sign the browser out of one it has not established yet.
+   */
+  authStatus: async (): Promise<AuthStatus> => {
+    const res = await fetch('/api/auth/status');
+    if (!res.ok) {
+      throw new Error((await res.text()).trim() || `${res.status} ${res.statusText}`);
+    }
+    return (await res.json()) as AuthStatus;
   },
 
   /** ticket mints a short-lived credential for the SSE stream. */

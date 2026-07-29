@@ -169,6 +169,58 @@ func TestNegotiateAuthRefusesNoAuthOnly(t *testing.T) {
 	}
 }
 
+// With AUTH_DISABLED there is no credential to bypass, so "no authentication" is
+// the one case where 0x00 may be selected — otherwise `socks5h://host:9250` with
+// no userinfo, which is the whole point of the flag, could never connect.
+func TestNegotiateAuthAcceptsNoAuthWhenDisabled(t *testing.T) {
+	client, server := newClientServer(t)
+
+	go func() { _, _ = client.Write([]byte{socks5Version, 1, authNone}) }()
+	got := collect(client, 2)
+
+	key, err := negotiateAuth(server, nil)
+	if err != nil {
+		t.Fatalf("negotiateAuth: %v", err)
+	}
+	if key != "" {
+		t.Errorf("session key = %q, want empty so the caller applies DEFAULT_SESSION", key)
+	}
+	// 0x00, not 0x02: no sub-negotiation follows, and selecting user/pass would
+	// leave the server waiting for a credential the client never offered.
+	want := []byte{socks5Version, authNone}
+	if reply := <-got; !bytes.Equal(reply, want) {
+		t.Errorf("reply = %v, want %v", reply, want)
+	}
+}
+
+// The regression this guards: with auth off it is tempting to just select 0x00
+// whenever it is offered, since every real client offers it. That silently throws
+// away the username — and the username is the session key, so every caller would
+// collapse onto DEFAULT_SESSION and share one exit IP. It reads as a routing bug,
+// not as a consequence of AUTH_DISABLED.
+func TestNegotiateAuthKeepsTheSessionKeyWhenDisabled(t *testing.T) {
+	client, server := newClientServer(t)
+
+	go func() {
+		_, _ = client.Write([]byte{socks5Version, 2, authNone, authUserPass})
+		drain(client, 2) // method selection
+		_, _ = client.Write([]byte{userPassVersion, 6})
+		_, _ = client.Write([]byte("sess-a"))
+		// A password the verifier would refuse, to prove it is never consulted.
+		_, _ = client.Write([]byte{5})
+		_, _ = client.Write([]byte("wrong"))
+		drain(client, 2) // auth status
+	}()
+
+	key, err := negotiateAuth(server, nil)
+	if err != nil {
+		t.Fatalf("negotiateAuth: %v", err)
+	}
+	if key != "sess-a" {
+		t.Errorf("session key = %q, want sess-a", key)
+	}
+}
+
 func TestNegotiateAuthRejectsUnknownMethods(t *testing.T) {
 	client, server := newClientServer(t)
 

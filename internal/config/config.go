@@ -48,7 +48,25 @@ type Config struct {
 
 	// Authentication. Every field here is comparable on purpose: Defaults() is
 	// compared for equality in tests, so a slice or a map would not compile.
-	AdminUser string
+	//
+	// AuthDisabled turns off every credential check: the proxy listeners accept
+	// any connection and the API answers without a bearer token. It exists for a
+	// pool bound to loopback on a development machine, where provisioning a token
+	// to talk to your own container is friction with nothing to show for it.
+	//
+	// It defaults to false and must never default otherwise. On a reachable
+	// interface this hands anyone who can open a socket free Tor bandwidth, the
+	// ability to restart instances, and the session table — and unlike a weak
+	// password there is nothing left to guess.
+	//
+	// Deliberately not validated against BindHost. That would look like the
+	// obvious safety check and would be wrong here: BindHost is 0.0.0.0 in every
+	// container because a container-loopback bind is unreachable through a port
+	// mapping, so the reachability question is answered by the host-side publish,
+	// which this process cannot see. A check would refuse the one setup the flag
+	// is for and permit none it should.
+	AuthDisabled bool
+	AdminUser    string
 	// AdminPassword is generated on first boot when unset, and is the one
 	// credential never written to the store — see internal/auth.
 	AdminPassword string
@@ -241,6 +259,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envPort(look, "API_PORT", &c.APIPort))
 	collect(envString(look, "BIND_HOST", &c.BindHost))
 
+	collect(envBool(look, "AUTH_DISABLED", &c.AuthDisabled))
 	collect(envString(look, "ADMIN_USER", &c.AdminUser))
 	collect(envString(look, "ADMIN_PASSWORD", &c.AdminPassword))
 	collect(envString(look, "PROXY_TOKEN", &c.ProxyToken))

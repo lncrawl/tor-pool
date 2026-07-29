@@ -41,6 +41,13 @@ type Router interface {
 // A function type rather than an interface because that is the whole dependency,
 // and declaring it here rather than importing internal/auth keeps the handshake
 // tests free of a credential store — the same reason Router is declared here.
+//
+// A nil check means authentication is disabled and the listeners must not
+// challenge at all. That is a distinct state from a check that accepts
+// everything: SOCKS5 refuses a client offering only "no authentication", and the
+// HTTP proxy answers 407 to a request with no Proxy-Authorization header, both
+// before any password exists to be accepted. Nil arrives from exactly one place,
+// Server.credentials, so there is a single line to read to know when it happens.
 type credentialCheck func(secret string) error
 
 // handshakeTimeout bounds how long a client may take to complete a SOCKS5
@@ -76,6 +83,20 @@ type Server struct {
 // NewServer builds the proxy listeners. Nothing binds until Start.
 func NewServer(cfg *config.Config, router Router, verify credentialCheck, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, router: router, verify: verify, log: log}
+}
+
+// credentials is the check the handshake must apply, or nil when AUTH_DISABLED
+// has switched authentication off.
+//
+// The flag is consulted here rather than at each use so that the whole listener
+// side of the decision is one function. The verifier is kept, not discarded: a
+// caller that still sends a token is still sending a session key alongside it,
+// and that key is the reason the credential travels in a proxy URL at all.
+func (s *Server) credentials() credentialCheck {
+	if s.cfg.AuthDisabled {
+		return nil
+	}
+	return s.verify
 }
 
 // Start binds the configured listeners and serves until ctx is cancelled.
@@ -152,7 +173,7 @@ func (s *Server) handleSocks(ctx context.Context, client net.Conn) {
 	if err := client.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
 		return
 	}
-	req, err := readSocksRequest(client, s.verify)
+	req, err := readSocksRequest(client, s.credentials())
 	if err != nil {
 		// A malformed handshake or a refused credential is the client's fault; no
 		// instance is involved yet, so nothing is scored.

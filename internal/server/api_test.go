@@ -38,10 +38,20 @@ type testServer struct {
 // — which is exactly the edge the handlers most often get wrong.
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
+	return newTestServerWith(t, nil)
+}
+
+// newTestServerWith is newTestServer with a chance to alter the configuration
+// first, for the tests that need authentication switched off.
+func newTestServerWith(t *testing.T, adjust func(*config.Config)) *testServer {
+	t.Helper()
 
 	cfg := config.Defaults()
 	cfg.DataDir = t.TempDir()
 	cfg.AdminPassword = testPassword
+	if adjust != nil {
+		adjust(&cfg)
+	}
 	log := slog.New(slog.DiscardHandler)
 
 	fleet := tor.NewFleet(tor.FleetOptions{

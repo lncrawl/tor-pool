@@ -75,8 +75,11 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn) {
 		//
 		// Checked before routing, which also means an unauthenticated caller
 		// cannot claim a session and consume a MAX_SESSIONS entry (invariant 11).
+		// A nil check is AUTH_DISABLED. The header is still parsed either way,
+		// because its username is the session key and a caller that sends one
+		// must keep its stickiness.
 		supplied, secret, ok := proxyAuthCredential(req)
-		if !ok || s.verify(secret) != nil {
+		if verify := s.credentials(); verify != nil && (!ok || verify(secret) != nil) {
 			// Nothing was routed, so no instance is scored and Finish is not
 			// called. Logged to stderr rather than the bounded event ring, which a
 			// flood of refusals would otherwise wipe.

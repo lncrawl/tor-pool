@@ -56,7 +56,7 @@ export const useLive = () => useContext(LiveContext);
  * goroutine and a ticker, and every view wants the same snapshot anyway.
  */
 export function LiveProvider({ children }: { children: ReactNode }) {
-  const { token } = useAuth();
+  const { token, required } = useAuth();
   const [pool, setPool] = useState<Pool>();
   const [instances, setInstances] = useState<Instance[]>([]);
   const [history, setHistory] = useState<Sample[]>([]);
@@ -68,7 +68,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const lastSampleAt = useRef<string>('');
 
   useEffect(() => {
-    if (!token) return;
+    // "Nothing to connect with", not "no token". Under AUTH_DISABLED there is no
+    // token and none is needed, and gating on the token alone left the stream
+    // unopened: no pool, no history, no events, and a permanent "reconnecting"
+    // badge over a dashboard that was in fact reachable the whole time.
+    if (required && !token) return;
 
     let closed = false;
     let source: EventSource | undefined;
@@ -171,7 +175,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       if (timer !== undefined) window.clearTimeout(timer);
       source?.close();
     };
-  }, [token]);
+  }, [token, required]);
 
   const value = useMemo<LiveState>(
     () => ({ pool, instances, history, events, connected }),
