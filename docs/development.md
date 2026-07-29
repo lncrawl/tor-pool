@@ -49,13 +49,6 @@ commit the build output over it: the real `index.html` references a hashed asset
 not tracked, so a binary built from it serves a broken page. `git checkout
 internal/server/dist/index.html` after building locally.
 
-## Refreshing the screenshots
-
-See the header of [`web/scripts/screenshots.mjs`](../web/scripts/screenshots.mjs).
-Drive some traffic through the pool first, or every chart is empty.
-
-Playwright is deliberately not a project dependency; it is only needed for this.
-
 ## Gotchas
 
 - **`networkidle` never fires.** The dashboard holds an SSE connection open for its
