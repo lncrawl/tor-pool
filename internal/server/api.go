@@ -474,6 +474,14 @@ func (s *Server) handleSessionFailure(w http.ResponseWriter, r *http.Request) {
 
 	instance, ok := s.pool.ReportFailure(key, kind, reason)
 	if !ok {
+		// There is genuinely nothing to attribute to: without the session's
+		// assignment the instance that carried the request is unknown, and blaming
+		// one would spend a healthy exit. Logged rather than dropped in silence,
+		// because a client reporting a block for a session that expired under
+		// SESSION_TTL — or vanished in a restart — is the one case where both sides
+		// look healthy while the evidence is lost.
+		s.log.Warn("failure reported for an unknown session",
+			"session", key, "kind", kind, "reason", reason)
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
 	}

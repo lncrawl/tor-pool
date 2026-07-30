@@ -22,8 +22,13 @@ and stays on the same exit IP until it asks to move. When an exit starts failing
 pool takes it out of rotation, moves its callers elsewhere, and works it back into
 service.
 
-- **Sticky by session** — the SOCKS5 username is a session key. Same key, same exit IP.
-  Different keys, different exits. Many callers can deliberately share one key.
+- **Sticky by session** — the SOCKS5 username is a session key. Same key, same instance;
+  different keys, different instances. Many callers can deliberately share one key.
+  For same key, *same exit IP*, set `PIN_EXIT_RELAY=true`: an instance holds several
+  exit-bearing circuits and Tor picks between them per stream, so without the pin one
+  instance can hand you more than one address with no rotation involved. It is off by
+  default because a pinned instance depends on one relay — see
+  [configuration](docs/configuration.md#circuit-policy).
 - **Rotation without the wait** — Tor enforces a ~10 second cooldown between circuit
   changes. Rotating a *session* reassigns it to an instance that has already built its
   circuits, so it takes milliseconds.
@@ -187,6 +192,7 @@ Everything is an environment variable. The common ones:
 | `DEFAULT_SESSION` | `ip` | How a caller that names no session is pinned: `ip`, `random`, `shared`. |
 | `SESSION_TTL` | 10m | Unpin a session after this long idle. |
 | `QUARANTINE_FAILURES` | 5 | Unclassified failures within `FAILURE_WINDOW` before quarantine. A captcha spends several of them, a rate limit less than one. |
+| `PIN_EXIT_RELAY` | false | Lock each instance to one exit relay, so same session means same exit IP. |
 | `TOR_EXIT_NODES` | — | Restrict exits, e.g. `{us},{ca}`. |
 
 <details>
@@ -209,15 +215,19 @@ With [`lncrawl-scraper`](https://github.com/lncrawl/scraper), which reports bloc
 to the pool automatically:
 
 ```python
-from scraper import Scraper, TorPoolProxyUrl, default_config
+from scraper import Scraper, ScraperConfig, TorPoolSpec
 
-config = default_config()
-config.proxy.proxy_urls = [TorPoolProxyUrl(session="my-crawl")]
-s = Scraper(config=config)
+config = ScraperConfig(exits=[TorPoolSpec(token="tp_7Kq2mXvR8nB4jL6wYtZaPc")])
+with Scraper(origin="https://example.com", config=config) as s:
+    s.get_json("https://example.com/api")        # sticky exit
 
-s.get_json("https://example.com/api")   # sticky exit
-s.proxy_manager.rotate()                # instant move to another exit
+    key = s.memory.key("https://example.com/")   # the pool session is per origin
+    s.exits.rotate(key)                          # instant move to another exit
 ```
+
+Rotation is usually not yours to call: the library rotates on its own when it concludes
+the address is what is being refused, and reports the reason so the pool can retire that
+exit for every other caller.
 
 With anything else, it is just a proxy:
 

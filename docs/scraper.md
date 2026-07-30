@@ -14,57 +14,78 @@ closed later: the password is ignored while the flag is on, so a config with a r
 works in both cases and needs no second edit.
 
 ```python
-from scraper import Scraper, TorPoolProxyUrl, default_config
+from scraper import Scraper, ScraperConfig, TorPoolSpec
 
-config = default_config()
-config.proxy.proxy_urls = [
-    TorPoolProxyUrl(
-        url="socks5h://127.0.0.1:9250",
-        api_url="http://127.0.0.1:8080",
-        token="tp_7Kq2mXvR8nB4jL6wYtZaPc",   # a proxy-scoped token
-        session="my-crawl",   # omit for a generated per-Scraper key
-    )
-]
-s = Scraper(config=config)
+config = ScraperConfig(
+    exits=[
+        TorPoolSpec(
+            url="socks5h://127.0.0.1:9250",
+            api_url="http://127.0.0.1:8080",
+            token="tp_7Kq2mXvR8nB4jL6wYtZaPc",   # a proxy-scoped token
+        )
+    ]
+)
+with Scraper(origin="https://example.com", config=config) as s:
+    s.get_json("https://example.com/api")        # same exit every time
 
-s.get_json("https://example.com/api")   # same exit every time
-s.proxy_manager.rotate()                # instant move to another exit
+    key = s.memory.key("https://example.com/")
+    s.exits.rotate(key)                          # instant move to another exit
 ```
 
-A runnable version: [`examples/11_tor_pool.py`](https://github.com/lncrawl/scraper/blob/main/examples/11_tor_pool.py).
+The defaults of `TorPoolSpec` are the ports above, so a pool on this machine needs only
+`TorPoolSpec(token=...)` — and nothing at all against one running `AUTH_DISABLED`.
+
+Calling `rotate` yourself is the exception. The library rotates on its own when it
+concludes the address is what is being refused, which is the whole reason to report
+failures: see below.
 
 ## Sessions
 
-Leave `session` blank and each `ProxyManager` generates its own key, so two `Scraper`s
-in one process get independent exit IPs. Set it explicitly when you want several
-processes to deliberately share an exit, or when you want a stable key to look up in the
-dashboard.
+**The session key is not yours to choose.** `scraper` mints one per origin it leases an
+address for — `s-` followed by twelve hex characters — and uses it as the SOCKS5 username.
+So two origins in one `Scraper` get independent exits, and the same origin keeps one for
+as long as it keeps working. A rotation mints a new key, which is what makes the move
+visible to everything bound to the address.
+
+Two consequences worth knowing. Deliberately sharing one exit across processes is not
+expressible through `scraper`; use the proxy directly, as below, if you need it. And a key
+is not stable across runs, so a session cannot be looked up in the dashboard from one run
+to the next — find it by instance or by exit IP instead.
 
 ## Failure reporting
 
-The engine reports automatically on:
+A report goes out whenever the library decides to leave an address, and what it sends is
+derived from the **layer** it concluded was binding — not from the status code. That is the
+whole point of the mapping: a 403 and a 429 can each be several different things, and the
+kind decides how much the report counts for.
 
-| Signal | Reason sent | Typed as |
-| --- | --- | --- |
-| `ProxyError` / `ConnectionError` | `transport` | `transport` |
-| HTTP 403 | `http_403` | `blocked` |
-| A Cloudflare challenge | `challenge` | `captcha` |
-| HTTP 429 with no challenge behind it | `rate_limited` | `rate_limited` |
+| Layer concluded | `kind` sent |
+| --- | --- |
+| Reputation, bot-fight, super-bot-fight, bot-management | `blocked` |
+| Managed challenge, Turnstile, under-attack, CDP detection | `captcha` |
+| Per-zone behavioural model | `rate_limited` |
+| Nothing attributed — a transport failure through the exit | `transport` |
+| Any other layer | `other` |
 
-A Cloudflare challenge often arrives *as* a 429, and the challenge handlers look at the
-body rather than the status, so a challenged response is reported as one — the last row is
-a plain throttle only.
+`reason` carries the layer's own name for the audit log, or `transport` when there is none.
+
+Note the last two rows. A connection error through the proxy is reported as `transport`
+with no layer, because the site never answered — there is nothing to conclude about it,
+and the pool weighs a transport failure differently from a block for exactly that reason.
 
 Call it yourself when your own code detects a block:
 
 ```python
-s.proxy_manager.report_failure("captcha")
+from scraper.layers import Layer
+
+key = s.memory.key("https://example.com/")
+s.exits.report(s.exits.lease(key), Layer.MANAGED_CHALLENGE)   # sent as kind=captcha
 ```
 
 This matters more than it looks. The pool relays opaque bytes and cannot see a 403 or a
 captcha inside an HTTPS tunnel, so without these reports a burnt exit keeps taking
-traffic until it happens to fail at the transport level. Set `report_failures=False` to
-opt out.
+traffic until it happens to fail at the transport level. Set
+`TorPoolSpec(report_failures=False)` to opt out.
 
 **What you send decides what happens.** The pool types every report and weighs it: a
 `captcha` retires the exit in the fewest reports, `http_403` in a few more, and a 429

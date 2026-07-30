@@ -414,7 +414,18 @@ func TestGeneratedCredentialsAreAlphanumeric(t *testing.T) {
 // giveaway is that '0'..'7' then outnumber the rest. Checked as a distribution
 // because there is no other way to see a bias from outside the function.
 func TestRandomBase62IsUnbiased(t *testing.T) {
-	const draws = 60000
+	// Sized, not guessed. What this measures is easy to detect and was easy to
+	// false-positive on. Folding rather than rejecting maps five bytes to each of
+	// the first eight characters and four to each of the rest, so the bias is 5/4 —
+	// the first eight come out ~25% likelier, measured. The 1% bound below has
+	// enormous margin against that.
+	//
+	// The problem was the other tail. The statistic compares the mean count of the
+	// eight favoured characters against the mean of the other fifty-four, and its
+	// own spread is ~1.2% at sixty thousand draws — so a 1% bound sat inside the
+	// noise and a fair generator failed about one run in five, measured over sixty.
+	// At four million the spread is ~0.15%, putting the bound at ~6.8 sigma.
+	const draws = 4_000_000
 
 	s, err := randomBase62(draws)
 	if err != nil {
@@ -428,9 +439,6 @@ func TestRandomBase62IsUnbiased(t *testing.T) {
 		t.Fatalf("saw %d distinct characters, want all %d", len(counts), len(base62Alphabet))
 	}
 
-	// The biased implementation over-represents the first eight by ~1.6%; this
-	// bound is wide enough that a fair draw will not trip it and narrow enough
-	// that the fold would. Expected count per character is draws/62 ≈ 967.
 	expected := float64(draws) / float64(len(base62Alphabet))
 	var favoured, rest float64
 	for r, n := range counts {
@@ -439,7 +447,7 @@ func TestRandomBase62IsUnbiased(t *testing.T) {
 		} else {
 			rest += float64(n)
 		}
-		if float64(n) < expected*0.8 || float64(n) > expected*1.2 {
+		if float64(n) < expected*0.95 || float64(n) > expected*1.05 {
 			t.Errorf("character %q appeared %d times, want about %.0f", r, n, expected)
 		}
 	}

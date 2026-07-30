@@ -9,6 +9,45 @@ means.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The stickiness promise is stated where it is made.** `README.md` said "same key, same
+  exit IP" unqualified while `PIN_EXIT_RELAY` defaults to off, and the caveat that makes the
+  difference sat four documents away. Without the pin an instance holds several exit-bearing
+  circuits and Tor picks between them per stream, so one instance can hand a caller more than
+  one address with no rotation involved. The bullet now promises the instance rather than the
+  address and names the flag; `PIN_EXIT_RELAY` is in the environment table beside it.
+
+- **The Python integration documentation described an API that no longer exists.** Every
+  snippet in `README.md` and `docs/scraper.md` was written against `lncrawl-scraper` 0.x —
+  `default_config()`, `TorPoolProxyUrl`, `config.proxy.proxy_urls`, `proxy_manager.rotate()`,
+  `report_failure()`, and a link to an example file that is not in that repo. All of it
+  raises on 1.x, and it was the whole of the Python integration guide. Rewritten against
+  `ScraperConfig(exits=[TorPoolSpec(...)])` and `Scraper.exits`, verified against the
+  library.
+
+  Two documented behaviours were not merely renamed but are gone: a caller **cannot choose
+  the session key** — 1.x mints one per origin — and the failure `kind` is derived from the
+  detection layer the library concluded was binding, not from the status code. Both sections
+  now say so, since the old text told readers to do things that cannot be done.
+
+- **A failure report for an unknown session is no longer dropped in silence.** The endpoint
+  answered `404` and logged nothing, so a client reporting a block for a session that expired
+  under `SESSION_TTL` — or vanished in a restart — lost the evidence with both sides looking
+  healthy. It still answers `404`, because without the session's assignment the instance that
+  carried the request is unknown and blaming one would spend a healthy exit, but the report is
+  now logged with its key, kind and reason.
+
+- **`TestRandomBase62IsUnbiased` no longer flakes.** It failed **12 runs in 60** — measured,
+  and CI runs it on every push. The generator is correct: `limit` is 248, exactly four times
+  62, and bytes at or above it are rejected rather than folded. The test was underpowered.
+  Its statistic compares the mean count of the eight favoured characters against the mean of
+  the other fifty-four, and at sixty thousand draws that statistic's own spread is ~1.2% —
+  so the 1% bound it asserts sat *inside* the noise. Four million draws puts the spread at
+  ~0.15% and the bound at ~6.8 sigma, and the run costs 24ms. The comment claiming the fold
+  biases by ~1.6% was also wrong: five bytes map to each of the first eight against four for
+  the rest, so the real figure is 25%, measured by reintroducing it.
+
 ### Added
 
 - **The documentation is published at
