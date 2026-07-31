@@ -4,66 +4,25 @@ All notable changes are documented here. The format is based on [Keep a Changelo
 
 `ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag means.
 
-## [0.3.1]
-
-### Fixed
-
-- **The stickiness promise is stated where it is made.** `README.md` promised "same key, same exit IP" unqualified, but without `PIN_EXIT_RELAY` — off by default — an instance holds several exit-bearing circuits and Tor picks between them per stream, so one instance can hand a caller more than one address. The bullet now promises the instance rather than the address, and names the flag beside it.
-- **The Python integration documentation described an API that no longer exists.** Every snippet in `README.md` and `docs/scraper.md` was written against `lncrawl-scraper` 0.x and raises on 1.x. Rewritten against `ScraperConfig(exits=[TorPoolSpec(...)])` and `Scraper.exits`, verified against the library. Two behaviours are gone rather than renamed: a caller cannot choose the session key, and the failure `kind` comes from the detection layer rather than the status code.
-- **A failure report for an unknown session is no longer dropped in silence.** It still answers `404` — without the session's assignment, blaming an instance would spend a healthy exit — but the key, kind and reason are now logged, instead of the evidence vanishing with both sides looking healthy.
-- **`TestRandomBase62IsUnbiased` no longer flakes.** It failed 12 runs in 60. The generator is correct; the test was underpowered — at sixty thousand draws its statistic's own spread was ~1.2%, wider than the 1% bound it asserted. Four million draws costs 24ms and puts the bound at ~6.8 sigma. The comment claiming the rejected fold biases by ~1.6% was also wrong: measured, it is 25%.
+## [0.3.0] - 2026-07-31
 
 ### Added
 
-- **The documentation is published at [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)** — `docs/` with the README as its landing page and this changelog as a page, built by `docs.yml` on pushes to `main`. No second copy: the markdown stays written for GitHub and `.github/docs-site.sh` rewrites repo-relative links while staging. A pull request builds without deploying, with `strict: true`, so a link that resolves in neither place fails there rather than shipping.
-
-## [0.3.0] - 2026-07-30
-
-### Added
-
-- **`AUTH_DISABLED=true` turns off every credential check.** The SOCKS5 listener accepts a client offering no authentication method, the HTTP listener stops answering `407`, and the API answers without a bearer token — so a plain `socks5h://127.0.0.1:9250` works and the dashboard opens straight to the pool instead of a sign-in screen. For a pool on the machine you are working on, where minting a token to talk to your own container is friction that buys nothing.
-
-  A caller that still sends a credential is unaffected. The password is ignored, and the username beside it is still read as the session key — dropping that would collapse every caller onto `DEFAULT_SESSION` and one exit IP, which reads as a routing bug rather than as a consequence of a flag.
-
-  **Only ever set this where nothing else can reach the ports.** There is no partial version: whoever can open a socket gets your Tor bandwidth, the session table, and the ability to restart instances, and unlike a weak password there is nothing left to guess. It is not validated against `BIND_HOST`, which would look like the obvious safety check and would be the wrong one — inside a container the bind has to be `0.0.0.0` for a port mapping to reach it, so the process cannot see whether it is exposed and would refuse the one setup the flag is for. Startup prints a banner block instead, and the dashboard shows an `auth disabled` tag where the sign-out control normally is. The Tokens tab is hidden, since nothing would check what it issued — the tokens themselves are still stored and start working the moment the flag goes.
-
-  Credentials are still generated, logged and stored on first boot while the flag is set, so removing it is a restart rather than a second round of setup.
-
-- **`GET /api/auth/status`** — public, and reports `{"required":bool,"user":"…"}`. The dashboard reads it to decide whether to render a sign-in screen at all; a script can use it to tell a deliberately open pool from one whose credential it has got wrong. It reveals nothing that any other request does not already answer as a `401` or a `200`.
+- **`AUTH_DISABLED=true` turns off every credential check** — SOCKS5, the HTTP proxy's `407` and the API's bearer token — so a plain `socks5h://127.0.0.1:9250` works and the dashboard opens straight to the pool. **Only set it where nothing else can reach the ports**: whoever can open a socket gets your Tor bandwidth, the session table and the ability to restart instances. `GET /api/auth/status` reports whether authentication is required.
+- **Typed failure reports.** `POST /api/sessions/{key}/failure` accepts `kind`: `captcha`, `blocked`, `rate_limited`, `transport` or `other`. A captcha means the exit IP is burnt, so two reports quarantine the instance; a 429 means the exit still works, so it counts for less than one and never trips `QUARANTINE_CONSECUTIVE`. `reason` still works, and a bodyless `POST` is still worth one ordinary failure.
+- **`failure_score`, `quarantine_score` and `failures_by_kind`** in each instance's health, with matching `torpool_*` metrics — the score, not the report count, is what says how close an instance is to quarantine.
+- **Documentation at [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)**, built from `docs/` on every push to `main`.
 
 ### Changed
 
-- **`compose.yml` now sets `AUTH_DISABLED=true` by default.** It publishes every port to `127.0.0.1`, so the only caller is the machine running it. `AUTH_DISABLED=false` in your `.env` restores checking, and you should set it in the same breath as widening any `*_PUBLISH` line. The `docker run` quickstart in the README is unchanged and still authenticates, because a command line gets copied onto servers.
-
-  **Read this before upgrading if you deploy from a checkout of this repo.** Pulling this release and restarting turns authentication off on a pool that had it on — and if you had already widened `API_PUBLISH` or the proxy publishes in your `.env`, that pool becomes reachable and unauthenticated in the same step. Set `AUTH_DISABLED=false` in your `.env` before you restart, and it stays off permanently. Deployments that keep their own compose file or use `docker run` are unaffected: the default lives in the repo's `compose.yml`, not in the image, whose own default remains `false`.
-
-- **Generated tokens and token ids are alphanumeric** — `tp_` plus 22 characters of base62 instead of base64url. Same length, same just-over-128 bits, no `-` or `_`. Those two characters are legal in URL userinfo, so the old form was not wrong on the wire; it was wrong everywhere else a token travels. They are what lets a token word-broken by a terminal, or half-selected by a double-click, come back subtly different — and the failure then presents as a refused credential with no hint that the string was mangled rather than wrong at the source. The draw uses rejection sampling, not `% 62`, which would have made the first eight characters of the alphabet about 1.6% likelier.
-
-  Tokens issued before this keep working: only the prefix is checked on the way in, and what is stored is a digest. Nothing to migrate.
-
-- **`DELETE /api/sessions/{key}` moves from the `admin` scope to `proxy`**, so a client can release the session it created. Under `admin` no client ever could: a scraper holds a `proxy` token by design, so every session it opened sat in its slot until `SESSION_TTL` and a caller that opened several in a row walked the pool out of capacity. The symptom arrives nowhere near the cause — the next connection simply fails, and a client with a proxy in the path reads a dead connection as evidence about the exit, so it gets blamed on the destination rather than on the leak.
-
-  Releasing a session you created is housekeeping, not administration. `GET /api/sessions` stays `admin`: enumerating everyone else's sessions is an operator view. As documented at `internal/pool/sessions.go`, a key is an identity hint and not a boundary, so this does not stop one caller dropping another's — every token belongs to the same operator, and the alternative was a guaranteed leak.
-
-  Nothing to migrate: an `admin` token still works, and `lncrawl-scraper` 1.0 is the first client to call this.
-
-### Added
-
-- **Failure reports are typed, and weighed by what they say.** `POST /api/sessions/{key}/failure` accepts `kind`: `captcha`, `blocked`, `rate_limited`, `transport` or `other`. A captcha means the exit IP is burnt, so it quarantines the instance in two reports instead of `QUARANTINE_FAILURES` of them; a 429 means the exit works and is being asked for too much, so it counts for less than one report, never trips the consecutive count, and never spends an instance's probation. Rotating away from a rate limit discards a working exit and arrives at the next one still throttled.
-
-  Nothing breaks. `reason` is still accepted, still free text in the audit log, and is what a report is typed from when `kind` is absent — the reasons `lncrawl-scraper` sends (`transport`, `http_403`, `challenge`, and now `rate_limited`) map to the kinds they mean, unrecognised text counts as `other`, and **a bodyless `POST` remains a valid signal** worth exactly one unremarkable failure. The response echoes the kind the report was read as, since that decides what it counted for. `QUARANTINE_FAILURES` still means that many *untyped* failures, and no single report — however heavy — retires an instance on its own unless you set it to `1`.
-
-  Two things bound this, and neither is a weight. `QUARANTINE_CONSECUTIVE` is blind to kind, so a caller failing with no success in between still hits that limit first whatever it reports; the weighing is what separates reports from a caller that is still getting work done. And keeping rate limits out of that count, and out of the failure that ends a probation, does more for a throttled caller than their weight does.
-
-- **`failure_score`, `quarantine_score` and `failures_by_kind`** in each instance's health, and `torpool_instance_failure_kinds_total`, `torpool_instance_failure_score` and `torpool_quarantine_score` in `/metrics`. The report count no longer says how close an instance is to quarantine; the score does. Instances' failures column shows the breakdown on hover.
-
-### Changed
-
-- **The dashboard is built on React 19, AntD 6, recharts 3, Vite 8 and TypeScript 7.** No behaviour or layout changes — every dependency was on a major behind, and staying there was going to make the eventual jump land all at once. Nothing in the dashboard source needed changing for it.
+- **`compose.yml` defaults to `AUTH_DISABLED=true`**, since it publishes every port to `127.0.0.1`. **If you deploy from a checkout of this repo, set `AUTH_DISABLED=false` in your `.env` before upgrading** — a restart otherwise turns authentication off, and if you had widened a `*_PUBLISH` line the pool becomes reachable and unauthenticated in the same step. The image's own default is still `false`, so `docker run` and your own compose file are unaffected.
+- **Tokens and token ids are base62** — `tp_` plus 22 alphanumerics instead of base64url. Same bits, no `-` or `_` for a terminal to word-break or a double-click to half-select. Tokens issued before this keep working.
+- **`DELETE /api/sessions/{key}` needs `proxy`, not `admin`**, so a client can release the session it created. A scraper holds a `proxy` token by design, so until now every session it opened sat in its slot until `SESSION_TTL`, and enough of them ran the pool out of capacity. `GET /api/sessions` stays `admin`.
 
 ### Fixed
 
-- **The dashboard stopped polling the session list once you left the Sessions tab.** Opening it started a 3-second `GET /api/sessions` loop that then ran for the life of the page, because the tab strip keeps hidden panes mounted so their sort and filter state survives a switch. A dashboard left open on Overview was still asking for the full session table every three seconds — on a busy pool, the most expensive read there is. The pane is now told when it is off screen, and re-fetches immediately on the way back rather than showing what was left from the last visit.
+- **The dashboard no longer polls the session list from a hidden tab.** Opening Sessions started a 3-second `GET /api/sessions` loop that then ran for the life of the page.
+- **The Python examples in `README.md` and `docs/scraper.md` run against `lncrawl-scraper` 1.x**, and the stickiness promise now names `PIN_EXIT_RELAY` — without it one instance can hand a caller more than one exit IP.
 
 ## [0.2.0] - 2026-07-29
 
@@ -148,7 +107,6 @@ The first release with notes. The earlier `v0.0.x` tags were created automatical
 - Retired instances no longer leave their per-instance counters behind, a resize honours `SPAWN_STAGGER`, `POST /api/instances/{id}/drain` answers 404 for an instance that does not exist, and `?newnym=1` is accepted alongside `?newnym=true`.
 - Fixed data races on an instance's process handle during a restart, and on the NEWNYM cooldown timestamp.
 
-[0.3.1]: https://github.com/lncrawl/tor-pool/compare/v0.3.0...0.3.1
-[0.3.0]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...0.3.0
-[0.2.0]: https://github.com/lncrawl/tor-pool/compare/v0.1.0..v0.2.0
+[0.3.0]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/lncrawl/tor-pool/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.1.0

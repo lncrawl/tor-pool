@@ -1,11 +1,5 @@
 name: Verify image
 
-# Build the image and prove a pool actually comes up in it.
-#
-# A build succeeding says nothing about whether tor starts, its control port
-# authenticates, or bootstrap completes — and tor arrives from Alpine at build
-# time, so a rebuild with no code change can break all three. That is the whole
-# risk a scheduled rebuild carries, which is why it runs this before publishing.
 on:
   workflow_call:
     inputs:
@@ -26,9 +20,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Host architecture only, and loaded rather than pushed. A broken tor
-      # package breaks both architectures identically — it is the same Alpine
-      # package — so emulating arm64 here would double the time to learn nothing.
       - name: Build image
         uses: docker/build-push-action@v7
         with:
@@ -39,8 +30,6 @@ jobs:
           tags: tor-pool:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # The point is to test the packages that will ship, not the ones that
-          # were cached the last time someone touched the source.
           pull: true
           no-cache-filters: runtime
 
@@ -49,12 +38,8 @@ jobs:
           docker run --rm --entrypoint tor tor-pool:ci --version | head -1 \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # A pool that cannot boot is the failure mode a build alone would miss.
-      # One instance is enough to prove tor starts, the control port
-      # authenticates and bootstrap completes.
       - name: Boot a single-instance pool
         env:
-          # Fixed rather than generated, so the assertions below can sign in.
           ADMIN_PASSWORD: ci-only-password
         run: |
           set -euo pipefail
@@ -65,8 +50,6 @@ jobs:
             -p 127.0.0.1:8080:8080 \
             tor-pool:ci
 
-          # /health is public on purpose: the container healthcheck cannot send
-          # a credential either.
           ready=false
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null; then
@@ -82,9 +65,6 @@ jobs:
             exit 1
           fi
 
-          # The negative half, and the only end-to-end proof that authentication
-          # is switched on at all. Note the -f: this step used to run `curl -s`
-          # without it, so a 401 body printed and the step still passed.
           echo "== unauthenticated /api/instances must be refused =="
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/instances)
           if [ "$code" != "401" ]; then
@@ -99,9 +79,6 @@ jobs:
           }
 
           echo "== sign in and read the pool =="
-          # Responses are indented JSON, so the pattern has to tolerate the
-          # whitespace around the colon — without it this silently extracts
-          # nothing and the next call fails with a confusing 401.
           token=$(curl -sf -XPOST http://127.0.0.1:8080/api/auth/login \
             -H 'content-type: application/json' \
             -d "{\"user\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}" \
@@ -111,15 +88,6 @@ jobs:
             exit 1
           fi
           curl -sf -H "Authorization: Bearer $token" http://127.0.0.1:8080/api/instances
-
-      # The mirror image of the negative assertion above, and the only end-to-end
-      # proof that the escape hatch actually opens the door. Asserting it in Go
-      # tests only would leave the container free to ignore the variable — a
-      # missing passthrough in the entrypoint looks exactly like a closed pool.
-      #
-      # No wait for /health: the API listener is up before the fleet finishes
-      # bootstrapping, and none of these routes needs a routable instance. That is
-      # what keeps this from costing a second two-minute boot.
       - name: A pool with AUTH_DISABLED must answer without a credential
         run: |
           set -euo pipefail
@@ -155,13 +123,21 @@ jobs:
             docker logs torpool-open
             exit 1
           fi
-
-          # The banner is the only thing standing between this flag and an
-          # operator who forgot they set it, so it has to actually be printed.
-          docker logs torpool-open 2>&1 | grep -q 'AUTHENTICATION IS DISABLED' || {
+ 
+          printed=false
+          for _ in $(seq 1 15); do
+            if docker logs torpool-open >"$RUNNER_TEMP/open.log" 2>&1 &&
+              grep -q 'AUTHENTICATION IS DISABLED' "$RUNNER_TEMP/open.log"; then
+              printed=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$printed" != true ]; then
             echo "the startup banner did not warn that authentication is off"
+            docker logs torpool-open
             exit 1
-          }
+          fi
 
       - name: Container logs
         if: always()
