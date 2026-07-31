@@ -1,370 +1,154 @@
 # Changelog
 
-All notable changes are documented here. The format is based on
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+All notable changes are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-`ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of
-`main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag
-means.
+`ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag means.
 
-## [Unreleased]
+## [0.3.1]
 
 ### Fixed
 
-- **The stickiness promise is stated where it is made.** `README.md` said "same key, same
-  exit IP" unqualified while `PIN_EXIT_RELAY` defaults to off, and the caveat that makes the
-  difference sat four documents away. Without the pin an instance holds several exit-bearing
-  circuits and Tor picks between them per stream, so one instance can hand a caller more than
-  one address with no rotation involved. The bullet now promises the instance rather than the
-  address and names the flag; `PIN_EXIT_RELAY` is in the environment table beside it.
-
-- **The Python integration documentation described an API that no longer exists.** Every
-  snippet in `README.md` and `docs/scraper.md` was written against `lncrawl-scraper` 0.x —
-  `default_config()`, `TorPoolProxyUrl`, `config.proxy.proxy_urls`, `proxy_manager.rotate()`,
-  `report_failure()`, and a link to an example file that is not in that repo. All of it
-  raises on 1.x, and it was the whole of the Python integration guide. Rewritten against
-  `ScraperConfig(exits=[TorPoolSpec(...)])` and `Scraper.exits`, verified against the
-  library.
-
-  Two documented behaviours were not merely renamed but are gone: a caller **cannot choose
-  the session key** — 1.x mints one per origin — and the failure `kind` is derived from the
-  detection layer the library concluded was binding, not from the status code. Both sections
-  now say so, since the old text told readers to do things that cannot be done.
-
-- **A failure report for an unknown session is no longer dropped in silence.** The endpoint
-  answered `404` and logged nothing, so a client reporting a block for a session that expired
-  under `SESSION_TTL` — or vanished in a restart — lost the evidence with both sides looking
-  healthy. It still answers `404`, because without the session's assignment the instance that
-  carried the request is unknown and blaming one would spend a healthy exit, but the report is
-  now logged with its key, kind and reason.
-
-- **`TestRandomBase62IsUnbiased` no longer flakes.** It failed **12 runs in 60** — measured,
-  and CI runs it on every push. The generator is correct: `limit` is 248, exactly four times
-  62, and bytes at or above it are rejected rather than folded. The test was underpowered.
-  Its statistic compares the mean count of the eight favoured characters against the mean of
-  the other fifty-four, and at sixty thousand draws that statistic's own spread is ~1.2% —
-  so the 1% bound it asserts sat *inside* the noise. Four million draws puts the spread at
-  ~0.15% and the bound at ~6.8 sigma, and the run costs 24ms. The comment claiming the fold
-  biases by ~1.6% was also wrong: five bytes map to each of the first eight against four for
-  the rest, so the real figure is 25%, measured by reintroducing it.
+- **The stickiness promise is stated where it is made.** `README.md` promised "same key, same exit IP" unqualified, but without `PIN_EXIT_RELAY` — off by default — an instance holds several exit-bearing circuits and Tor picks between them per stream, so one instance can hand a caller more than one address. The bullet now promises the instance rather than the address, and names the flag beside it.
+- **The Python integration documentation described an API that no longer exists.** Every snippet in `README.md` and `docs/scraper.md` was written against `lncrawl-scraper` 0.x and raises on 1.x. Rewritten against `ScraperConfig(exits=[TorPoolSpec(...)])` and `Scraper.exits`, verified against the library. Two behaviours are gone rather than renamed: a caller cannot choose the session key, and the failure `kind` comes from the detection layer rather than the status code.
+- **A failure report for an unknown session is no longer dropped in silence.** It still answers `404` — without the session's assignment, blaming an instance would spend a healthy exit — but the key, kind and reason are now logged, instead of the evidence vanishing with both sides looking healthy.
+- **`TestRandomBase62IsUnbiased` no longer flakes.** It failed 12 runs in 60. The generator is correct; the test was underpowered — at sixty thousand draws its statistic's own spread was ~1.2%, wider than the 1% bound it asserted. Four million draws costs 24ms and puts the bound at ~6.8 sigma. The comment claiming the rejected fold biases by ~1.6% was also wrong: measured, it is 25%.
 
 ### Added
 
-- **The documentation is published at
-  [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)** — `docs/` with the
-  README as its landing page and this changelog as a page, searchable, built by `docs.yml`
-  on every push to `main` that touches them. No second copy of anything: the markdown stays
-  written for GitHub and `.github/docs-site.sh` rewrites the repo-relative links while
-  staging it. The site tracks `main` rather than a release, so a documentation fix needs no
-  tag, and a pull request builds it without deploying — with `strict: true`, so a link that
-  resolves in neither the repo nor the site fails there rather than shipping.
+- **The documentation is published at [lncrawl.github.io/tor-pool](https://lncrawl.github.io/tor-pool/)** — `docs/` with the README as its landing page and this changelog as a page, built by `docs.yml` on pushes to `main`. No second copy: the markdown stays written for GitHub and `.github/docs-site.sh` rewrites repo-relative links while staging. A pull request builds without deploying, with `strict: true`, so a link that resolves in neither place fails there rather than shipping.
 
 ## [0.3.0] - 2026-07-30
 
 ### Added
 
-- **`AUTH_DISABLED=true` turns off every credential check.** The SOCKS5 listener accepts a
-  client offering no authentication method, the HTTP listener stops answering `407`, and the
-  API answers without a bearer token — so a plain `socks5h://127.0.0.1:9250` works and the
-  dashboard opens straight to the pool instead of a sign-in screen. For a pool on the machine
-  you are working on, where minting a token to talk to your own container is friction that
-  buys nothing.
+- **`AUTH_DISABLED=true` turns off every credential check.** The SOCKS5 listener accepts a client offering no authentication method, the HTTP listener stops answering `407`, and the API answers without a bearer token — so a plain `socks5h://127.0.0.1:9250` works and the dashboard opens straight to the pool instead of a sign-in screen. For a pool on the machine you are working on, where minting a token to talk to your own container is friction that buys nothing.
 
-  A caller that still sends a credential is unaffected. The password is ignored, and the
-  username beside it is still read as the session key — dropping that would collapse every
-  caller onto `DEFAULT_SESSION` and one exit IP, which reads as a routing bug rather than as
-  a consequence of a flag.
+  A caller that still sends a credential is unaffected. The password is ignored, and the username beside it is still read as the session key — dropping that would collapse every caller onto `DEFAULT_SESSION` and one exit IP, which reads as a routing bug rather than as a consequence of a flag.
 
-  **Only ever set this where nothing else can reach the ports.** There is no partial version:
-  whoever can open a socket gets your Tor bandwidth, the session table, and the ability to
-  restart instances, and unlike a weak password there is nothing left to guess. It is not
-  validated against `BIND_HOST`, which would look like the obvious safety check and would be
-  the wrong one — inside a container the bind has to be `0.0.0.0` for a port mapping to reach
-  it, so the process cannot see whether it is exposed and would refuse the one setup the flag
-  is for. Startup prints a banner block instead, and the dashboard shows an `auth disabled`
-  tag where the sign-out control normally is. The Tokens tab is hidden, since nothing would
-  check what it issued — the tokens themselves are still stored and start working the moment
-  the flag goes.
+  **Only ever set this where nothing else can reach the ports.** There is no partial version: whoever can open a socket gets your Tor bandwidth, the session table, and the ability to restart instances, and unlike a weak password there is nothing left to guess. It is not validated against `BIND_HOST`, which would look like the obvious safety check and would be the wrong one — inside a container the bind has to be `0.0.0.0` for a port mapping to reach it, so the process cannot see whether it is exposed and would refuse the one setup the flag is for. Startup prints a banner block instead, and the dashboard shows an `auth disabled` tag where the sign-out control normally is. The Tokens tab is hidden, since nothing would check what it issued — the tokens themselves are still stored and start working the moment the flag goes.
 
-  Credentials are still generated, logged and stored on first boot while the flag is set, so
-  removing it is a restart rather than a second round of setup.
+  Credentials are still generated, logged and stored on first boot while the flag is set, so removing it is a restart rather than a second round of setup.
 
-- **`GET /api/auth/status`** — public, and reports `{"required":bool,"user":"…"}`. The
-  dashboard reads it to decide whether to render a sign-in screen at all; a script can use it
-  to tell a deliberately open pool from one whose credential it has got wrong. It reveals
-  nothing that any other request does not already answer as a `401` or a `200`.
+- **`GET /api/auth/status`** — public, and reports `{"required":bool,"user":"…"}`. The dashboard reads it to decide whether to render a sign-in screen at all; a script can use it to tell a deliberately open pool from one whose credential it has got wrong. It reveals nothing that any other request does not already answer as a `401` or a `200`.
 
 ### Changed
 
-- **`compose.yml` now sets `AUTH_DISABLED=true` by default.** It publishes every port to
-  `127.0.0.1`, so the only caller is the machine running it. `AUTH_DISABLED=false` in your
-  `.env` restores checking, and you should set it in the same breath as widening any
-  `*_PUBLISH` line. The `docker run` quickstart in the README is unchanged and still
-  authenticates, because a command line gets copied onto servers.
+- **`compose.yml` now sets `AUTH_DISABLED=true` by default.** It publishes every port to `127.0.0.1`, so the only caller is the machine running it. `AUTH_DISABLED=false` in your `.env` restores checking, and you should set it in the same breath as widening any `*_PUBLISH` line. The `docker run` quickstart in the README is unchanged and still authenticates, because a command line gets copied onto servers.
 
-  **Read this before upgrading if you deploy from a checkout of this repo.** Pulling this
-  release and restarting turns authentication off on a pool that had it on — and if you had
-  already widened `API_PUBLISH` or the proxy publishes in your `.env`, that pool becomes
-  reachable and unauthenticated in the same step. Set `AUTH_DISABLED=false` in your `.env`
-  before you restart, and it stays off permanently. Deployments that keep their own compose
-  file or use `docker run` are unaffected: the default lives in the repo's `compose.yml`, not
-  in the image, whose own default remains `false`.
+  **Read this before upgrading if you deploy from a checkout of this repo.** Pulling this release and restarting turns authentication off on a pool that had it on — and if you had already widened `API_PUBLISH` or the proxy publishes in your `.env`, that pool becomes reachable and unauthenticated in the same step. Set `AUTH_DISABLED=false` in your `.env` before you restart, and it stays off permanently. Deployments that keep their own compose file or use `docker run` are unaffected: the default lives in the repo's `compose.yml`, not in the image, whose own default remains `false`.
 
-- **Generated tokens and token ids are alphanumeric** — `tp_` plus 22 characters of base62
-  instead of base64url. Same length, same just-over-128 bits, no `-` or `_`. Those two
-  characters are legal in URL userinfo, so the old form was not wrong on the wire; it was
-  wrong everywhere else a token travels. They are what lets a token word-broken by a
-  terminal, or half-selected by a double-click, come back subtly different — and the failure
-  then presents as a refused credential with no hint that the string was mangled rather than
-  wrong at the source. The draw uses rejection sampling, not `% 62`, which would have made
-  the first eight characters of the alphabet about 1.6% likelier.
+- **Generated tokens and token ids are alphanumeric** — `tp_` plus 22 characters of base62 instead of base64url. Same length, same just-over-128 bits, no `-` or `_`. Those two characters are legal in URL userinfo, so the old form was not wrong on the wire; it was wrong everywhere else a token travels. They are what lets a token word-broken by a terminal, or half-selected by a double-click, come back subtly different — and the failure then presents as a refused credential with no hint that the string was mangled rather than wrong at the source. The draw uses rejection sampling, not `% 62`, which would have made the first eight characters of the alphabet about 1.6% likelier.
 
-  Tokens issued before this keep working: only the prefix is checked on the way in, and what
-  is stored is a digest. Nothing to migrate.
+  Tokens issued before this keep working: only the prefix is checked on the way in, and what is stored is a digest. Nothing to migrate.
 
-- **`DELETE /api/sessions/{key}` moves from the `admin` scope to `proxy`**, so a client
-  can release the session it created. Under `admin` no client ever could: a scraper
-  holds a `proxy` token by design, so every session it opened sat in its slot until
-  `SESSION_TTL` and a caller that opened several in a row walked the pool out of
-  capacity. The symptom arrives nowhere near the cause — the next connection simply
-  fails, and a client with a proxy in the path reads a dead connection as evidence
-  about the exit, so it gets blamed on the destination rather than on the leak.
+- **`DELETE /api/sessions/{key}` moves from the `admin` scope to `proxy`**, so a client can release the session it created. Under `admin` no client ever could: a scraper holds a `proxy` token by design, so every session it opened sat in its slot until `SESSION_TTL` and a caller that opened several in a row walked the pool out of capacity. The symptom arrives nowhere near the cause — the next connection simply fails, and a client with a proxy in the path reads a dead connection as evidence about the exit, so it gets blamed on the destination rather than on the leak.
 
-  Releasing a session you created is housekeeping, not administration. `GET
-  /api/sessions` stays `admin`: enumerating everyone else's sessions is an operator
-  view. As documented at `internal/pool/sessions.go`, a key is an identity hint and not
-  a boundary, so this does not stop one caller dropping another's — every token belongs
-  to the same operator, and the alternative was a guaranteed leak.
+  Releasing a session you created is housekeeping, not administration. `GET /api/sessions` stays `admin`: enumerating everyone else's sessions is an operator view. As documented at `internal/pool/sessions.go`, a key is an identity hint and not a boundary, so this does not stop one caller dropping another's — every token belongs to the same operator, and the alternative was a guaranteed leak.
 
-  Nothing to migrate: an `admin` token still works, and `lncrawl-scraper` 1.0 is the
-  first client to call this.
+  Nothing to migrate: an `admin` token still works, and `lncrawl-scraper` 1.0 is the first client to call this.
 
 ### Added
 
-- **Failure reports are typed, and weighed by what they say.**
-  `POST /api/sessions/{key}/failure` accepts `kind`: `captcha`, `blocked`,
-  `rate_limited`, `transport` or `other`. A captcha means the exit IP is burnt, so it
-  quarantines the instance in two reports instead of `QUARANTINE_FAILURES` of them; a 429
-  means the exit works and is being asked for too much, so it counts for less than one
-  report, never trips the consecutive count, and never spends an instance's probation.
-  Rotating away from a rate limit discards a working exit and arrives at the next one
-  still throttled.
+- **Failure reports are typed, and weighed by what they say.** `POST /api/sessions/{key}/failure` accepts `kind`: `captcha`, `blocked`, `rate_limited`, `transport` or `other`. A captcha means the exit IP is burnt, so it quarantines the instance in two reports instead of `QUARANTINE_FAILURES` of them; a 429 means the exit works and is being asked for too much, so it counts for less than one report, never trips the consecutive count, and never spends an instance's probation. Rotating away from a rate limit discards a working exit and arrives at the next one still throttled.
 
-  Nothing breaks. `reason` is still accepted, still free text in the audit log, and is
-  what a report is typed from when `kind` is absent — the reasons `lncrawl-scraper` sends
-  (`transport`, `http_403`, `challenge`, and now `rate_limited`) map to the kinds they
-  mean, unrecognised text counts as `other`, and **a bodyless `POST` remains a valid
-  signal** worth exactly one unremarkable failure. The response echoes the kind the report
-  was read as, since that decides what it counted for. `QUARANTINE_FAILURES` still means
-  that many *untyped* failures, and no single report — however heavy — retires an instance
-  on its own unless you set it to `1`.
+  Nothing breaks. `reason` is still accepted, still free text in the audit log, and is what a report is typed from when `kind` is absent — the reasons `lncrawl-scraper` sends (`transport`, `http_403`, `challenge`, and now `rate_limited`) map to the kinds they mean, unrecognised text counts as `other`, and **a bodyless `POST` remains a valid signal** worth exactly one unremarkable failure. The response echoes the kind the report was read as, since that decides what it counted for. `QUARANTINE_FAILURES` still means that many *untyped* failures, and no single report — however heavy — retires an instance on its own unless you set it to `1`.
 
-  Two things bound this, and neither is a weight. `QUARANTINE_CONSECUTIVE` is blind to
-  kind, so a caller failing with no success in between still hits that limit first
-  whatever it reports; the weighing is what separates reports from a caller that is still
-  getting work done. And keeping rate limits out of that count, and out of the failure
-  that ends a probation, does more for a throttled caller than their weight does.
+  Two things bound this, and neither is a weight. `QUARANTINE_CONSECUTIVE` is blind to kind, so a caller failing with no success in between still hits that limit first whatever it reports; the weighing is what separates reports from a caller that is still getting work done. And keeping rate limits out of that count, and out of the failure that ends a probation, does more for a throttled caller than their weight does.
 
-- **`failure_score`, `quarantine_score` and `failures_by_kind`** in each instance's
-  health, and `torpool_instance_failure_kinds_total`,
-  `torpool_instance_failure_score` and `torpool_quarantine_score` in `/metrics`. The
-  report count no longer says how close an instance is to quarantine; the score does.
-  Instances' failures column shows the breakdown on hover.
+- **`failure_score`, `quarantine_score` and `failures_by_kind`** in each instance's health, and `torpool_instance_failure_kinds_total`, `torpool_instance_failure_score` and `torpool_quarantine_score` in `/metrics`. The report count no longer says how close an instance is to quarantine; the score does. Instances' failures column shows the breakdown on hover.
 
 ### Changed
 
-- **The dashboard is built on React 19, AntD 6, recharts 3, Vite 8 and TypeScript 7.**
-  No behaviour or layout changes — every dependency was on a major behind, and staying
-  there was going to make the eventual jump land all at once. Nothing in the dashboard
-  source needed changing for it.
+- **The dashboard is built on React 19, AntD 6, recharts 3, Vite 8 and TypeScript 7.** No behaviour or layout changes — every dependency was on a major behind, and staying there was going to make the eventual jump land all at once. Nothing in the dashboard source needed changing for it.
 
 ### Fixed
 
-- **The dashboard stopped polling the session list once you left the Sessions tab.** Opening
-  it started a 3-second `GET /api/sessions` loop that then ran for the life of the page,
-  because the tab strip keeps hidden panes mounted so their sort and filter state survives a
-  switch. A dashboard left open on Overview was still asking for the full session table every
-  three seconds — on a busy pool, the most expensive read there is. The pane is now told when
-  it is off screen, and re-fetches immediately on the way back rather than showing what was
-  left from the last visit.
+- **The dashboard stopped polling the session list once you left the Sessions tab.** Opening it started a 3-second `GET /api/sessions` loop that then ran for the life of the page, because the tab strip keeps hidden panes mounted so their sort and filter state survives a switch. A dashboard left open on Overview was still asking for the full session table every three seconds — on a busy pool, the most expensive read there is. The pane is now told when it is off screen, and re-fetches immediately on the way back rather than showing what was left from the last visit.
 
 ## [0.2.0] - 2026-07-29
 
-Authentication. **Every existing caller breaks until it presents a credential** — see
-the migration note below.
+Authentication. **Every existing caller breaks until it presents a credential** — see the migration note below.
 
 ### Breaking
 
-- **The proxy password is now a credential.** The SOCKS5 username is still the session
-  key, but the password — previously read and discarded — must be a token. A caller
-  offering no credentials is refused during the SOCKS5 handshake, and the HTTP proxy
-  answers `407` with a `Proxy-Authenticate` challenge.
+- **The proxy password is now a credential.** The SOCKS5 username is still the session key, but the password — previously read and discarded — must be a token. A caller offering no credentials is refused during the SOCKS5 handshake, and the HTTP proxy answers `407` with a `Proxy-Authenticate` challenge.
 
   ```
   before   socks5h://my-session:x@host:9250
   after    socks5h://my-session:tp_7Kq2mXvR8nB4jL6wYtZaPc@host:9250
   ```
 
-- **The REST API and dashboard require a credential.** `GET /health`, `GET /metrics`,
-  `POST /api/auth/login` and the dashboard's static assets stay public; everything else
-  under `/api/` answers `401`. An unmatched `/api/` path is authenticated before it
-  `404`s, so the surface no longer reports which endpoints exist.
+- **The REST API and dashboard require a credential.** `GET /health`, `GET /metrics`, `POST /api/auth/login` and the dashboard's static assets stay public; everything else under `/api/` answers `401`. An unmatched `/api/` path is authenticated before it `404`s, so the surface no longer reports which endpoints exist.
 
-No released `lncrawl-scraper` is affected: its tor-pool support is still unreleased and
-carries a `token` field from the start.
+No released `lncrawl-scraper` is affected: its tor-pool support is still unreleased and carries a `token` field from the start.
 
-**Migrating.** On the first boot after upgrading, a dashboard password and a
-`proxy`-scoped token are generated and printed once to the container log. Take the token
-and use it as the password in every proxy URL. To provision them from config instead,
-set `ADMIN_PASSWORD` and `PROXY_TOKEN`. Both live in `DATA_DIR`, so mount the volume or
-they are regenerated on every recreate.
+**Migrating.** On the first boot after upgrading, a dashboard password and a `proxy`-scoped token are generated and printed once to the container log. Take the token and use it as the password in every proxy URL. To provision them from config instead, set `ADMIN_PASSWORD` and `PROXY_TOKEN`. Both live in `DATA_DIR`, so mount the volume or they are regenerated on every recreate.
 
 ### Added
 
-- **Issued tokens.** Mint, name, scope and revoke credentials from the dashboard's new
-  Tokens tab. Only a digest is stored, so a secret is shown exactly once. Revoking takes
-  effect immediately — before the change reaches disk, so it cannot be undone by a
-  restart.
-- **Two scopes.** `proxy` covers traffic plus the session routes a caller uses to manage
-  its own sessions; `admin` covers everything. Give a scraper `proxy`: under `admin` the
-  credential in its config could also resize the pool and read every session key.
-- **A sign-in screen**, and `ADMIN_USER`/`ADMIN_PASSWORD` to configure the operator
-  login. Changing either invalidates every outstanding session immediately, which is the
-  answer to a credential exposure — there is no separate "sign out everywhere".
-- **`PROXY_TOKEN`**, a proxy credential fixed by configuration for deployments
-  provisioned from files rather than by hand. Verified like any token but never
-  persisted, so the environment stays authoritative.
-- **`LOGIN_TTL` and `LOGIN_RATE_LIMIT`.** Repeated wrong passwords from one address are
-  refused with `429`; a wrong username and a wrong password are answered identically.
-- **`auth` events** in the audit log for sign-ins and for tokens issued or revoked.
-  Refused *proxy* credentials are logged to stderr instead: the event ring is bounded, so
-  one entry per rejected connection would let anyone flush the audit history in seconds.
-- **Weekly rebuild of the moving image tags** against the current Alpine `tor`, so a Tor
-  security release reaches users without waiting for a tor-pool release. It refreshes
-  `edge`, `latest`, `X.Y` and `X`, never the exact `X.Y.Z` — that one promises the same
-  bytes every time. Each target has to boot a pool and bootstrap a circuit before it is
-  published.
+- **Issued tokens.** Mint, name, scope and revoke credentials from the dashboard's new Tokens tab. Only a digest is stored, so a secret is shown exactly once. Revoking takes effect immediately — before the change reaches disk, so it cannot be undone by a restart.
+- **Two scopes.** `proxy` covers traffic plus the session routes a caller uses to manage its own sessions; `admin` covers everything. Give a scraper `proxy`: under `admin` the credential in its config could also resize the pool and read every session key.
+- **A sign-in screen**, and `ADMIN_USER`/`ADMIN_PASSWORD` to configure the operator login. Changing either invalidates every outstanding session immediately, which is the answer to a credential exposure — there is no separate "sign out everywhere".
+- **`PROXY_TOKEN`**, a proxy credential fixed by configuration for deployments provisioned from files rather than by hand. Verified like any token but never persisted, so the environment stays authoritative.
+- **`LOGIN_TTL` and `LOGIN_RATE_LIMIT`.** Repeated wrong passwords from one address are refused with `429`; a wrong username and a wrong password are answered identically.
+- **`auth` events** in the audit log for sign-ins and for tokens issued or revoked. Refused *proxy* credentials are logged to stderr instead: the event ring is bounded, so one entry per rejected connection would let anyone flush the audit history in seconds.
+- **Weekly rebuild of the moving image tags** against the current Alpine `tor`, so a Tor security release reaches users without waiting for a tor-pool release. It refreshes `edge`, `latest`, `X.Y` and `X`, never the exact `X.Y.Z` — that one promises the same bytes every time. Each target has to boot a pool and bootstrap a circuit before it is published.
 
 ### Fixed
 
-- **A destination Tor was never going to reach no longer quarantines the instance.** Tor
-  refuses a private or loopback address, and that refusal was scored against the
-  instance — three requests for `127.0.0.1` were enough to quarantine a healthy one, and
-  enough of them emptied the pool. The request is still counted as failed; only the
-  remediation ladder is spared. Hostnames are unaffected, since a name that will not
-  resolve genuinely can mean a broken circuit.
-- **The SOCKS5 handshake has a read deadline.** A client that connected and sent one byte
-  held a goroutine and a file descriptor indefinitely.
-- **The HTTP proxy authenticates every request on a keep-alive connection**, not just the
-  first, so a later request cannot ride on an earlier one's credential.
+- **A destination Tor was never going to reach no longer quarantines the instance.** Tor refuses a private or loopback address, and that refusal was scored against the instance — three requests for `127.0.0.1` were enough to quarantine a healthy one, and enough of them emptied the pool. The request is still counted as failed; only the remediation ladder is spared. Hostnames are unaffected, since a name that will not resolve genuinely can mean a broken circuit.
+- **The SOCKS5 handshake has a read deadline.** A client that connected and sent one byte held a goroutine and a file descriptor indefinitely.
+- **The HTTP proxy authenticates every request on a keep-alive connection**, not just the first, so a later request cannot ride on an earlier one's credential.
 
 ### Changed
 
-- `DEFAULT_SESSION` now decides what happens when an *authenticated* caller names no
-  session, rather than when a caller sends no credentials.
-- A session key is still not a tenancy boundary: any valid token may claim any key, so
-  sessions separate exit identities rather than callers. Now documented rather than
-  implied.
+- `DEFAULT_SESSION` now decides what happens when an *authenticated* caller names no session, rather than when a caller sends no credentials.
+- A session key is still not a tenancy boundary: any valid token may claim any key, so sessions separate exit identities rather than callers. Now documented rather than implied.
 
 ## [0.1.0] - 2026-07-28
 
-The first release with notes. The earlier `v0.0.x` tags were created automatically by
-every push to `main`, so their numbers counted pushes rather than changes and none of
-them was ever accompanied by an entry here — this release is also where that stopped.
+The first release with notes. The earlier `v0.0.x` tags were created automatically by every push to `main`, so their numbers counted pushes rather than changes and none of them was ever accompanied by an entry here — this release is also where that stopped.
 
 ### Added
 
-- A pool of Tor instances in one container, behind a single sticky SOCKS5 and HTTP proxy
-  endpoint.
-- **Sticky sessions.** The SOCKS5 username (or `Proxy-Authorization` user) is a session
-  key; a caller keeps the same instance, and so the same exit IP, until it rotates.
-  Callers with no credentials are pinned by client IP.
-- **Instant rotation.** `POST /api/sessions/{key}/rotate` reassigns a session to an
-  already-built instance, skipping Tor's ~10s NEWNYM cooldown.
-- **Failure-driven remediation.** Failures are counted per instance from transport
-  errors and from client reports, and a bad instance escalates through new circuit →
-  wipe-restart → restart with exponential backoff.
-- **Management dashboard** with live updates over SSE: instance grid with per-instance
-  actions, sessions view, filterable audit log, and timeline charts.
+- A pool of Tor instances in one container, behind a single sticky SOCKS5 and HTTP proxy endpoint.
+- **Sticky sessions.** The SOCKS5 username (or `Proxy-Authorization` user) is a session key; a caller keeps the same instance, and so the same exit IP, until it rotates. Callers with no credentials are pinned by client IP.
+- **Instant rotation.** `POST /api/sessions/{key}/rotate` reassigns a session to an already-built instance, skipping Tor's ~10s NEWNYM cooldown.
+- **Failure-driven remediation.** Failures are counted per instance from transport errors and from client reports, and a bad instance escalates through new circuit → wipe-restart → restart with exponential backoff.
+- **Management dashboard** with live updates over SSE: instance grid with per-instance actions, sessions view, filterable audit log, and timeline charts.
 - **REST API** for instances, sessions, events and history, plus live pool resize.
-- Prometheus metrics at `/metrics`, and a `/health` check that reports routability
-  rather than process health.
+- Prometheus metrics at `/metrics`, and a `/health` check that reports routability rather than process health.
 - Multi-arch images (`linux/amd64`, `linux/arm64`) on `ghcr.io/lncrawl/tor-pool`.
-- **`PIN_EXIT_RELAY`** locks each instance to a single exit relay, so one instance really
-  is one exit IP until it rotates. Off by default: a pinned instance depends on one relay.
-- **`BOOTSTRAP_STALL_TIMEOUT`** restarts an instance that stops making bootstrap progress,
-  keeping its state on the first attempt and wiping it on the next.
-- `exit_confirmed` and `pinned_exit` on the instance API, surfaced in the dashboard: an
-  exit no traffic has used yet is shown as the guess it is.
+- **`PIN_EXIT_RELAY`** locks each instance to a single exit relay, so one instance really is one exit IP until it rotates. Off by default: a pinned instance depends on one relay.
+- **`BOOTSTRAP_STALL_TIMEOUT`** restarts an instance that stops making bootstrap progress, keeping its state on the first attempt and wiping it on the next.
+- `exit_confirmed` and `pinned_exit` on the instance API, surfaced in the dashboard: an exit no traffic has used yet is shown as the guess it is.
 
 ### Changed
 
-- **`latest` now means the newest release, not the last push to `main`.** Every push used
-  to bump a patch tag and move `latest`, so a README fix became a version number and
-  unreleased work reached everyone tracking `latest`. Pushes to `main` publish `edge`;
-  releases are cut deliberately from `CHANGELOG.md`. The weekly rebuild is gone with it —
-  `tor` now updates when you pull a newer image rather than on a timer.
-- **Conflux is off by default** (`TOR_CONFLUX`). Each set Tor pre-builds has its own exit
-  relay and successive requests land on different sets, so one instance handed a caller
-  several exit IPs with no rotation at all.
-- **`POST /api/instances/{id}/rotate` returns as soon as the instance is out of service**,
-  finishing Tor's cooldown in the background, instead of holding the request open for up to
-  ~13 seconds.
+- **`latest` now means the newest release, not the last push to `main`.** Every push used to bump a patch tag and move `latest`, so a README fix became a version number and unreleased work reached everyone tracking `latest`. Pushes to `main` publish `edge`; releases are cut deliberately from `CHANGELOG.md`. The weekly rebuild is gone with it — `tor` now updates when you pull a newer image rather than on a timer.
+- **Conflux is off by default** (`TOR_CONFLUX`). Each set Tor pre-builds has its own exit relay and successive requests land on different sets, so one instance handed a caller several exit IPs with no rotation at all.
+- **`POST /api/instances/{id}/rotate` returns as soon as the instance is out of service**, finishing Tor's cooldown in the background, instead of holding the request open for up to ~13 seconds.
 
 ### Fixed
 
-- **Rotation no longer drops requests in flight.** Retiring an instance's circuits spared
-  only the ones carrying a *connected* stream, so a request still waiting for its exit to
-  reach the destination had its circuit closed underneath it. Measured at 4–5% of requests
-  failing while rotating under load, against 0% at rest. Any circuit with a stream on it is
-  now left standing, whatever state that stream is in.
-- **A rotation no longer quarantines the instance it rotated.** The failures a rotation
-  causes were scored against the instance, so a few rotations were enough to quarantine a
-  healthy one — whose remediation rotated it again. Failures inside an instance's own
-  rotation window are no longer counted against it.
-- **`POST /api/pool/rotate` keeps the pool serving.** It rotated every instance at once,
-  leaving nothing to route to for a second or two. It now sweeps one instance at a time and
-  returns immediately, reporting whether a sweep was already running.
-- **The reported exit IP no longer jumps after a rotation.** Tor holds several
-  exit-bearing circuits and builds more preemptively, and the API named whichever looked
-  newest — an exit no traffic had used. Only a circuit carrying a stream now confirms an
-  exit, an inferred one can never displace a confirmed one, and `exit_confirmed` says which
-  it is.
-- **A session is no longer routed to an instance that is mid-rotation.** Diverting covered
-  the sessions pinned when the rotation began, but not the ones arriving during it.
-- **A stalled bootstrap is now remediated.** Tor can wedge part-way through with a live
-  process, which neither the supervisor nor the failure ladder catches, leaving the pool
-  quietly under strength — instances were observed sitting at 45% indefinitely. See
-  `BOOTSTRAP_STALL_TIMEOUT`.
-- **The maintenance loop cannot be stalled by a control port.** The exit poll shared a loop
-  with session sweeping and process supervision, and one instance's NEWNYM cooldown blocked
-  all three for up to ten seconds — a pool-wide rotation, for tens of seconds. Control
-  commands also had no I/O deadline, so a Tor that stopped answering wedged it forever.
-- **HTTP proxy: keep-alive requests are routed individually.** A client sending requests
-  for several hosts down one proxy connection had the second delivered to the first host.
-  Each request is now routed and dialled on its own, which also means a rotation takes
-  effect on the next plain request rather than when the client happens to reconnect.
-- **HTTP proxy: IPv6 destinations work.** A bracketed literal was passed to Tor as a
-  hostname to resolve.
-- A control connection lost while Tor keeps running is redialled, instead of leaving an
-  instance that serves traffic but can never be rotated or report its exit again.
-- Rotating an instance that has not bootstrapped is refused with 409 rather than spending
-  the NEWNYM cooldown on a Tor with no circuits — which silently swallowed the rotation
-  asked for once it was ready.
-- Rotating a session that lands back on its own instance (a one-instance pool, or one
-  instance routable) now rotates that instance's circuit, instead of reporting success
-  while changing nothing.
-- Instance indexes are reused instead of counted upwards, so enough resizes can no longer
-  hand an instance a SOCKS port that is another instance's control port.
-- Remediation backoff grows with the attempts at the current rung, not with the instance's
-  lifetime count — an instance that misbehaved last week no longer starts at maximum
-  backoff.
-- Retired instances no longer leave their per-instance counters behind, a resize honours
-  `SPAWN_STAGGER`, `POST /api/instances/{id}/drain` answers 404 for an instance that does
-  not exist, and `?newnym=1` is accepted alongside `?newnym=true`.
-- Fixed data races on an instance's process handle during a restart, and on the NEWNYM
-  cooldown timestamp.
+- **Rotation no longer drops requests in flight.** Retiring an instance's circuits spared only the ones carrying a *connected* stream, so a request still waiting for its exit to reach the destination had its circuit closed underneath it. Measured at 4–5% of requests failing while rotating under load, against 0% at rest. Any circuit with a stream on it is now left standing, whatever state that stream is in.
+- **A rotation no longer quarantines the instance it rotated.** The failures a rotation causes were scored against the instance, so a few rotations were enough to quarantine a healthy one — whose remediation rotated it again. Failures inside an instance's own rotation window are no longer counted against it.
+- **`POST /api/pool/rotate` keeps the pool serving.** It rotated every instance at once, leaving nothing to route to for a second or two. It now sweeps one instance at a time and returns immediately, reporting whether a sweep was already running.
+- **The reported exit IP no longer jumps after a rotation.** Tor holds several exit-bearing circuits and builds more preemptively, and the API named whichever looked newest — an exit no traffic had used. Only a circuit carrying a stream now confirms an exit, an inferred one can never displace a confirmed one, and `exit_confirmed` says which it is.
+- **A session is no longer routed to an instance that is mid-rotation.** Diverting covered the sessions pinned when the rotation began, but not the ones arriving during it.
+- **A stalled bootstrap is now remediated.** Tor can wedge part-way through with a live process, which neither the supervisor nor the failure ladder catches, leaving the pool quietly under strength — instances were observed sitting at 45% indefinitely. See `BOOTSTRAP_STALL_TIMEOUT`.
+- **The maintenance loop cannot be stalled by a control port.** The exit poll shared a loop with session sweeping and process supervision, and one instance's NEWNYM cooldown blocked all three for up to ten seconds — a pool-wide rotation, for tens of seconds. Control commands also had no I/O deadline, so a Tor that stopped answering wedged it forever.
+- **HTTP proxy: keep-alive requests are routed individually.** A client sending requests for several hosts down one proxy connection had the second delivered to the first host. Each request is now routed and dialled on its own, which also means a rotation takes effect on the next plain request rather than when the client happens to reconnect.
+- **HTTP proxy: IPv6 destinations work.** A bracketed literal was passed to Tor as a hostname to resolve.
+- A control connection lost while Tor keeps running is redialled, instead of leaving an instance that serves traffic but can never be rotated or report its exit again.
+- Rotating an instance that has not bootstrapped is refused with 409 rather than spending the NEWNYM cooldown on a Tor with no circuits — which silently swallowed the rotation asked for once it was ready.
+- Rotating a session that lands back on its own instance (a one-instance pool, or one instance routable) now rotates that instance's circuit, instead of reporting success while changing nothing.
+- Instance indexes are reused instead of counted upwards, so enough resizes can no longer hand an instance a SOCKS port that is another instance's control port.
+- Remediation backoff grows with the attempts at the current rung, not with the instance's lifetime count — an instance that misbehaved last week no longer starts at maximum backoff.
+- Retired instances no longer leave their per-instance counters behind, a resize honours `SPAWN_STAGGER`, `POST /api/instances/{id}/drain` answers 404 for an instance that does not exist, and `?newnym=1` is accepted alongside `?newnym=true`.
+- Fixed data races on an instance's process handle during a restart, and on the NEWNYM cooldown timestamp.
 
-[unreleased]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.2.0
+[0.3.1]: https://github.com/lncrawl/tor-pool/compare/v0.3.0...0.3.1
+[0.3.0]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...0.3.0
+[0.2.0]: https://github.com/lncrawl/tor-pool/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.1.0

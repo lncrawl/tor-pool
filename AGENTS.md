@@ -215,3 +215,9 @@ is the only thing that moves `latest`. The version lives in `CHANGELOG.md` and n
 the release refuses to run without a section for it. A weekly rebuild refreshes the moving tags
 against the current Alpine `tor`, never the exact `X.Y.Z`. GHCR is the only registry. See the
 `releasing` skill.
+
+**In `CHANGELOG.md`, keep each paragraph on one line — never hard-wrap.** `release-notes.sh`
+lifts a version's section out verbatim, and the renderer on the other side turns a single
+newline into a line break, so a wrapped paragraph arrives as a ragged column with its
+indentation showing. Blank lines still separate paragraphs, and a continuation paragraph
+inside a bullet still needs its indent.
