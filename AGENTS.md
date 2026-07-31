@@ -216,8 +216,11 @@ the release refuses to run without a section for it. A weekly rebuild refreshes 
 against the current Alpine `tor`, never the exact `X.Y.Z`. GHCR is the only registry. See the
 `releasing` skill.
 
-**In `CHANGELOG.md`, keep each paragraph on one line — never hard-wrap.** `release-notes.sh`
-lifts a version's section out verbatim, and the renderer on the other side turns a single
-newline into a line break, so a wrapped paragraph arrives as a ragged column with its
-indentation showing. Blank lines still separate paragraphs, and a continuation paragraph
-inside a bullet still needs its indent.
+**In `CHANGELOG.md`, keep each paragraph on one line, and keep entries short.**
+`release-notes.sh` lifts a version's section out verbatim, and the renderer on the other
+side turns a single newline into a line break — so never hard-wrap, or the paragraph
+arrives as a ragged column with its indentation showing. Blank lines still separate
+paragraphs, and a continuation paragraph inside a bullet still needs its indent. An entry
+is a bold lead sentence plus the shortest *why* that would stop someone undoing it — not
+the investigation that produced it. Reasoning at length belongs in the code comment or the
+docstring, where the reader is already looking at the thing it explains.
