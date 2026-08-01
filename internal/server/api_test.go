@@ -352,3 +352,33 @@ func TestUnknownAPIPathIs404(t *testing.T) {
 		t.Errorf("status = %d, want 404 — API paths must not fall through to the SPA", rec.Code)
 	}
 }
+
+// The session view carries the credential-free port for a session's instance.
+// Absent must mean "the feature is off" rather than "port zero", which is what
+// omitempty buys and what a client keys off.
+func TestSessionViewCarriesThePortOnlyWhenEnabled(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.SessionPortBase = 19600
+
+	on, err := json.Marshal(sessionView{
+		Session:     pool.Session{Key: "k", Instance: 3},
+		SessionPort: cfg.SessionPort(3),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(on), `"session_port":19603`) {
+		t.Errorf("enabled view = %s, want session_port 19603", on)
+	}
+
+	off, err := json.Marshal(sessionView{Session: pool.Session{Key: "k", Instance: 3}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(off), "session_port") {
+		t.Errorf("disabled view = %s, want no session_port at all", off)
+	}
+	if !strings.Contains(string(off), `"instance":3`) {
+		t.Errorf("disabled view = %s, should still carry the session itself", off)
+	}
+}

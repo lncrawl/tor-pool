@@ -191,6 +191,7 @@ Everything is an environment variable. The common ones:
 | `MIN_READY` | 1 | Serve once this many have bootstrapped. |
 | `DEFAULT_SESSION` | `ip` | How a caller that names no session is pinned: `ip`, `random`, `shared`. |
 | `SESSION_TTL` | 10m | Unpin a session after this long idle. |
+| `SESSION_PORT_BASE` | — | Open one credential-free SOCKS port per instance, at base+N. For callers that cannot send a username — see below. Needs `AUTH_DISABLED`. |
 | `QUARANTINE_FAILURES` | 5 | Unclassified failures within `FAILURE_WINDOW` before quarantine. A captcha spends several of them, a rate limit less than one. |
 | `PIN_EXIT_RELAY` | false | Lock each instance to one exit relay, so same session means same exit IP. |
 | `TOR_EXIT_NODES` | — | Restrict exits, e.g. `{us},{ca}`. |
@@ -208,6 +209,35 @@ to move, which breaks the promise this pool exists to make. The trade is linkabi
 more requests share one observable identity. Shorten it if you want the opposite.
 
 </details>
+
+### A port for callers that cannot send a username
+
+A session is named by the SOCKS username, and some callers have no way to send one.
+For example: Chrome refuses `--proxy-server` outright when the
+URL carries credentials, and Firefox offers no way to supply them either.
+
+Dropping the username is not the answer. An anonymous connection falls back to
+`DEFAULT_SESSION`, which keys by client IP — so a browser and the crawler reusing its
+work become two sessions on two instances, and therefore two exit relays. Whatever the
+browser earned is then replayed from an address that never earned it, which reads as the
+site refusing you rather than as a routing mistake.
+
+`SESSION_PORT_BASE` opens one listener per instance instead, each pinned to its own and
+taking no credentials. Ask the API which instance a session is on and it hands back the
+port to use:
+
+```console
+$ curl -s localhost:9252/api/sessions/my-session | jq '{instance, session_port}'
+{ "instance": 3, "session_port": 19603 }
+```
+
+Point the browser at `socks5://<host>:19603` and it shares an exit relay with everything
+else on `my-session`. Connections still route through the pool, so they are scored and
+attributed like any other; they are accounted under `instance-3` rather than under the
+session, since the session is the one thing this port is not choosing by.
+
+Requires `AUTH_DISABLED`, and refuses to start otherwise — a credential-free port
+alongside listeners that demand a password would undo them silently.
 
 ## Use it from Python
 

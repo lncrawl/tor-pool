@@ -402,13 +402,30 @@ func (s *Server) handleSessions(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, sessions)
 }
 
+// sessionView is a session plus the port that reaches its instance without
+// credentials.
+//
+// Carried here rather than left for the caller to compute, because the sum needs
+// SESSION_PORT_BASE — a server-side setting a client would otherwise have to be
+// told out of band, and would then be wrong about the moment it changed.
+// Omitted entirely when the feature is off, so absent means "not available"
+// rather than "port zero".
+type sessionView struct {
+	pool.Session
+	SessionPort int `json:"session_port,omitempty"`
+}
+
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.pool.Session(r.PathValue("key"))
 	if !ok {
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, sess)
+	view := sessionView{Session: sess}
+	if s.cfg.SessionPortBase != 0 {
+		view.SessionPort = s.cfg.SessionPort(sess.Instance)
+	}
+	writeJSON(w, view)
 }
 
 func (s *Server) handleSessionRotate(w http.ResponseWriter, r *http.Request) {

@@ -26,6 +26,9 @@ type Outcome = pool.Outcome
 type Router interface {
 	// Route returns the SOCKS address of the instance this session should use.
 	RouteAddr(sessionKey string) (instance int, socksAddr string, err error)
+	// InstanceAddr returns the SOCKS address of one named instance, refusing
+	// rather than substituting when it cannot serve.
+	InstanceAddr(instance int) (socksAddr string, err error)
 	// Finish records the outcome of a completed connection.
 	Finish(sessionKey string, out Outcome)
 	// RecordTransportFailure attributes a transport-level failure to an
@@ -113,6 +116,37 @@ func (s *Server) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.startSessionPorts(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// startSessionPorts binds one credential-free listener per instance.
+//
+// Refused unless authentication is off, because these listeners cannot ask for a
+// password — see Config.SessionPortBase. Failing at boot is the point: a pool
+// that quietly ignored the setting would hand a caller an address that routes
+// nowhere, and the symptom would appear as a browser that cannot solve.
+func (s *Server) startSessionPorts(ctx context.Context) error {
+	if s.cfg.SessionPortBase == 0 {
+		return nil
+	}
+	if !s.cfg.AuthDisabled {
+		return errors.New(
+			"SESSION_PORT_BASE needs AUTH_DISABLED: these listeners take no credentials")
+	}
+	for i := range s.cfg.PoolSize {
+		instance := i
+		addr := net.JoinHostPort(s.cfg.BindHost, fmt.Sprint(s.cfg.SessionPort(instance)))
+		name := fmt.Sprintf("socks5/instance-%d", instance)
+		handle := func(ctx context.Context, conn net.Conn) {
+			s.handlePinnedSocks(ctx, conn, instance)
+		}
+		if err := s.serve(ctx, name, addr, handle); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -195,6 +229,56 @@ func (s *Server) handleSocks(ctx context.Context, client net.Conn) {
 		writeSocksReply(client, replyGeneralFailure)
 		return
 	}
+
+	dialStart := time.Now()
+	upstream, err := dialThroughInstance(ctx, socksAddr, req.target)
+	if err != nil {
+		s.reportDialFailure(instance, key, req.target, err)
+		writeSocksReply(client, dialFailureReply(err))
+		return
+	}
+	latency := time.Since(dialStart)
+	defer func() { _ = upstream.Close() }()
+
+	writeSocksReply(client, replySuccess)
+	s.sampleExitSoon(ctx, instance)
+	s.finish(key, instance, req.target, latency, relay(client, upstream))
+}
+
+// handlePinnedSocks serves a session port: the instance is decided by which
+// port the client connected to, not by anything the client said.
+//
+// The handshake still runs, and still with s.credentials() — which is nil here,
+// since these listeners only exist when authentication is off. A username is
+// accepted and ignored rather than refused: it names a session, and a session is
+// the one thing this port is not choosing by.
+func (s *Server) handlePinnedSocks(ctx context.Context, client net.Conn, instance int) {
+	defer func() { _ = client.Close() }()
+
+	if err := client.SetReadDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return
+	}
+	req, err := readSocksRequest(client, s.credentials())
+	if err != nil {
+		s.log.Warn("socks handshake failed",
+			"remote", remoteHost(client), "instance", instance, "error", err)
+		return
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		return
+	}
+
+	socksAddr, err := s.router.InstanceAddr(instance)
+	if err != nil {
+		s.log.Warn("session port has no usable instance", "instance", instance, "error", err)
+		writeSocksReply(client, replyGeneralFailure)
+		return
+	}
+
+	// Accounted under a key of its own. Naming the instance keeps these
+	// connections legible in the session table, and keeps them from being mixed
+	// into the statistics of whichever session happens to share the instance.
+	key := fmt.Sprintf("instance-%d", instance)
 
 	dialStart := time.Now()
 	upstream, err := dialThroughInstance(ctx, socksAddr, req.target)

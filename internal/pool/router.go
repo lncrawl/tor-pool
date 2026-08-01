@@ -1,6 +1,9 @@
 package pool
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // exitSampleDebounce bounds how often one instance's exit relay is re-read while
 // connections are arriving, so a burst costs a single control-port query.
@@ -17,6 +20,26 @@ func (p *Pool) RouteAddr(sessionKey string) (instance int, socksAddr string, err
 	}
 	cfg := inst.Config()
 	return inst.Index(), cfg.SocksAddr(), nil
+}
+
+// InstanceAddr resolves one instance directly, for a caller that already knows
+// which one it wants.
+//
+// This is the deliberate exception to routing by session. RouteAddr is free to
+// reassign a session whose instance is unready or rotating, which is what makes
+// it robust — and exactly wrong for a caller whose whole requirement is to reach
+// the same exit relay as a session it is paired with. Silently sending it
+// elsewhere would produce the failure it was trying to avoid, so an instance
+// that cannot serve is an error here rather than a substitution.
+func (p *Pool) InstanceAddr(instance int) (string, error) {
+	inst, alive := p.fleet.Get(instance)
+	if !alive {
+		return "", fmt.Errorf("instance %d is not in the fleet", instance)
+	}
+	if !inst.Ready() {
+		return "", fmt.Errorf("instance %d is not ready", instance)
+	}
+	return inst.Config().SocksAddr(), nil
 }
 
 // RecordTransportFailure attributes a transport-level failure to an instance.

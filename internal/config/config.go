@@ -46,6 +46,26 @@ type Config struct {
 	APIPort   int
 	BindHost  string
 
+	// SessionPortBase opens one credential-free SOCKS listener per instance,
+	// at SessionPort(i), each pinned to instance i. Zero disables them.
+	//
+	// This exists for callers that cannot send a username. A browser is the
+	// case that forced it: Chrome rejects --proxy-server outright when the URL
+	// carries credentials, and Firefox has no way to supply them either, so
+	// neither can name a session on the main port.
+	//
+	// Dropping the username instead would not do. An anonymous connection falls
+	// back to DEFAULT_SESSION, which keys by client IP — so a browser and the
+	// requests that reuse its work would be two different sessions on two
+	// different instances, and therefore two different exit relays. Whatever the
+	// browser earned is then replayed from an address that did not earn it.
+	// Addressing the instance directly is what keeps them together.
+	//
+	// Bound only when AuthDisabled is set. A credential-free port is the whole
+	// point, and opening one beside listeners that do demand a password would
+	// undo them silently rather than visibly.
+	SessionPortBase int
+
 	// Authentication. Every field here is comparable on purpose: Defaults() is
 	// compared for equality in tests, so a slice or a map would not compile.
 	//
@@ -194,6 +214,14 @@ func Defaults() Config {
 // InstanceSocksPort returns the loopback SOCKS port for instance index i.
 func (c *Config) InstanceSocksPort(i int) int { return c.InstancePortBase + i }
 
+// SessionPort returns the credential-free listener port for instance index i.
+//
+// Unlike InstanceSocksPort this is one of ours, not tor's: it routes through the
+// pool, so a connection is still scored, sampled and attributed to its instance.
+// Handing out tor's own port instead would be a shorter path to the same exit
+// and would make every one of those connections invisible to the balancer.
+func (c *Config) SessionPort(i int) int { return c.SessionPortBase + i }
+
 // InstanceControlPort returns the loopback control port for instance index i.
 //
 // Control ports sit in a second block above the SOCKS block so the two can
@@ -258,6 +286,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envPort(look, "HTTP_PORT", &c.HTTPPort))
 	collect(envPort(look, "API_PORT", &c.APIPort))
 	collect(envString(look, "BIND_HOST", &c.BindHost))
+	collect(envPort(look, "SESSION_PORT_BASE", &c.SessionPortBase))
 
 	collect(envBool(look, "AUTH_DISABLED", &c.AuthDisabled))
 	collect(envString(look, "ADMIN_USER", &c.AdminUser))
@@ -416,6 +445,26 @@ func (c *Config) validatePorts() error {
 			c.InstancePortBase, c.PoolSize, highest))
 	}
 
+	// The session block is a range, so it is checked as one before the single
+	// ports below join the collision map instance by instance.
+	if c.SessionPortBase != 0 {
+		if c.SessionPortBase < 1024 {
+			errs = append(errs, fmt.Errorf(
+				"SESSION_PORT_BASE must be at least 1024, got %d", c.SessionPortBase))
+		}
+		if top := c.SessionPort(c.PoolSize - 1); top > 65535 {
+			errs = append(errs, fmt.Errorf(
+				"SESSION_PORT_BASE %d with POOL_SIZE %d needs ports up to %d, past 65535",
+				c.SessionPortBase, c.PoolSize, top))
+		}
+		lo, hi := c.InstancePortBase, c.InstanceControlPort(c.PoolSize-1)
+		if c.SessionPortBase <= hi && c.SessionPort(c.PoolSize-1) >= lo {
+			errs = append(errs, fmt.Errorf(
+				"SESSION_PORT_BASE %d with POOL_SIZE %d overlaps the instance port range %d..%d",
+				c.SessionPortBase, c.PoolSize, lo, hi))
+		}
+	}
+
 	listeners := map[int]string{}
 	for _, l := range []struct {
 		port int
@@ -426,6 +475,13 @@ func (c *Config) validatePorts() error {
 		{c.APIPort, "API_PORT"},
 	} {
 		if l.port == 0 {
+			continue
+		}
+		if c.SessionPortBase != 0 &&
+			l.port >= c.SessionPortBase && l.port <= c.SessionPort(c.PoolSize-1) {
+			errs = append(errs, fmt.Errorf(
+				"%s (%d) falls inside the session port range starting at SESSION_PORT_BASE %d",
+				l.name, l.port, c.SessionPortBase))
 			continue
 		}
 		if other, dup := listeners[l.port]; dup {

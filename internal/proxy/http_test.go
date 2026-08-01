@@ -22,12 +22,34 @@ import (
 // what was finished so the accounting can be asserted.
 type fakeRouter struct {
 	addr string
+	// instanceErr makes InstanceAddr refuse, which is the only way a session
+	// port can fail after the handshake.
+	instanceErr error
 
-	mu       sync.Mutex
-	routes   int
-	keys     []string
-	finished []Outcome
-	failures []string
+	mu        sync.Mutex
+	routes    int
+	keys      []string
+	instances []int
+	finished  []Outcome
+	failures  []string
+}
+
+func (r *fakeRouter) InstanceAddr(instance int) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.instances = append(r.instances, instance)
+	if r.instanceErr != nil {
+		return "", r.instanceErr
+	}
+	return r.addr, nil
+}
+
+// pinned is which instances were addressed directly, so a test can prove a
+// session port ignored the session and used its own.
+func (r *fakeRouter) pinned() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.instances...)
 }
 
 func (r *fakeRouter) RouteAddr(key string) (int, string, error) {

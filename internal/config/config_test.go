@@ -238,6 +238,55 @@ func TestPortRangeOverflowIsRejected(t *testing.T) {
 	}
 }
 
+func TestSessionPortsAreDisabledUnlessAskedFor(t *testing.T) {
+	c, err := loadFrom(env(map[string]string{}))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Off by default because these listeners take no credentials. A default that
+	// opened them would be a default that weakens the pool.
+	if c.SessionPortBase != 0 {
+		t.Errorf("SessionPortBase = %d by default, want 0", c.SessionPortBase)
+	}
+}
+
+func TestSessionPortRangeMustNotOverlapTheInstanceBlocks(t *testing.T) {
+	// 19000 is INSTANCE_PORT_BASE's default, so this asks for the session block
+	// to sit exactly on top of tor's own ports.
+	_, err := loadFrom(env(map[string]string{"SESSION_PORT_BASE": "19000"}))
+	if err == nil {
+		t.Fatal("expected an error when the session range overlaps the instance range")
+	}
+	if !strings.Contains(err.Error(), "SESSION_PORT_BASE") {
+		t.Errorf("error should name the setting at fault, got: %v", err)
+	}
+}
+
+func TestSessionPortRangeMustNotSwallowAListener(t *testing.T) {
+	// A pool of 8 puts the session block at 9248..9255, which covers the default
+	// SOCKS_PORT of 9250 — bound twice, and only one of them does what it says.
+	_, err := loadFrom(env(map[string]string{
+		"SESSION_PORT_BASE": "9248",
+		"POOL_SIZE":         "8",
+	}))
+	if err == nil {
+		t.Fatal("expected an error when the session range contains SOCKS_PORT")
+	}
+}
+
+func TestSessionPortRangeOverflowIsRejected(t *testing.T) {
+	_, err := loadFrom(env(map[string]string{
+		"SESSION_PORT_BASE": "65500",
+		"POOL_SIZE":         "100",
+	}))
+	if err == nil {
+		t.Fatal("expected an error when the session range passes 65535")
+	}
+	if !strings.Contains(err.Error(), "65535") {
+		t.Errorf("error should mention the ceiling, got: %v", err)
+	}
+}
+
 func TestValidateBoundsChecks(t *testing.T) {
 	tests := map[string]func(*Config){
 		"pool size zero":       func(c *Config) { c.PoolSize = 0 },

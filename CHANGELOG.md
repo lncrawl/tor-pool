@@ -4,6 +4,12 @@ All notable changes are documented here. The format is based on [Keep a Changelo
 
 `ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag means.
 
+## [Unreleased]
+
+### Added
+
+- **`SESSION_PORT_BASE` — one credential-free SOCKS port per instance**, at base+N, for callers that cannot send a username. A browser is the case that forced it: Chrome refuses `--proxy-server` outright when the URL carries credentials, and Firefox cannot supply them either. Dropping the username instead would fall back to `DEFAULT_SESSION` and key by client IP, so a browser and the crawler reusing its work would land on two instances and two exit relays — and a clearance replayed from an address that did not earn it reads as the site refusing you. `GET /api/sessions/{key}` now answers with `session_port` so a caller is told its port rather than computing one from a setting it cannot see. Requires `AUTH_DISABLED` and refuses to start without it, since a credential-free port beside listeners that demand a password would undo them silently.
+
 ## [0.3.0] - 2026-07-31
 
 ### Added

@@ -51,6 +51,11 @@ services:
       # Idle sessions are unpinned after this long.
       SESSION_TTL: '${SESSION_TTL:-10m}'
 
+      # One credential-free SOCKS port per instance, at this base plus the instance
+      # index, for a caller that cannot send a username — a browser, mainly. Off
+      # unless you set it, and it needs the matching ports published below.
+      SESSION_PORT_BASE: '${SESSION_PORT_BASE:-}'
+
       # Move an instance's sessions elsewhere when it is rotated.
       DRAIN_ON_ROTATE: '${DRAIN_ON_ROTATE:-true}'
 
@@ -71,6 +76,11 @@ services:
 
       # HTTP/HTTPS CONNECT proxy, for tools without SOCKS support.
       - '${HTTP_PUBLISH:-127.0.0.1:9251}:9251'
+
+      # Per-instance credential-free ports, if SESSION_PORT_BASE is set above. The
+      # range has to cover POOL_SIZE, and these take no password at all, so publish
+      # them no wider than loopback:
+      # - '127.0.0.1:19600-19604:19600-19604'
 
       # Dashboard and REST API. Loopback, and this is the line that makes the
       # AUTH_DISABLED default above safe — widening it without also setting
