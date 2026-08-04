@@ -124,6 +124,10 @@ type Pool struct {
 	// its own rotation.
 	quietUntil map[int]time.Time
 
+	// exitSince is when each instance's current exit identity began, which is
+	// what EXIT_TTL is measured against.
+	exitSince map[int]time.Time
+
 	// sweeping guards a pool-wide rotation, which runs one instance at a time
 	// and would otherwise be started again by every click while it ran.
 	sweeping bool
@@ -144,6 +148,7 @@ func New(cfg *config.Config, fleet *tor.Fleet, log *slog.Logger) *Pool {
 		startAttempts:  make(map[int]int),
 		rotating:       make(map[int]int),
 		quietUntil:     make(map[int]time.Time),
+		exitSince:      make(map[int]time.Time),
 	}
 }
 
@@ -202,6 +207,7 @@ func (p *Pool) forgetInstance(instance int) {
 	delete(p.startAttempts, instance)
 	delete(p.rotating, instance)
 	delete(p.quietUntil, instance)
+	delete(p.exitSince, instance)
 	p.healthMu.Unlock()
 
 	p.sampleMu.Lock()
@@ -217,7 +223,8 @@ func (p *Pool) forgetInstance(instance int) {
 func (p *Pool) Fleet() *tor.Fleet { return p.fleet }
 
 // Run maintains the pool until ctx is cancelled: the idle-session sweep, process
-// supervision, and the exit-relay poll.
+// supervision, the exit-relay poll, and the scheduled rotation of exits that have
+// outlived EXIT_TTL.
 //
 // The exit poll runs in its own goroutine. It talks to every instance's control
 // port, and a control port can be busy for as long as tor's NEWNYM cooldown — so
@@ -229,6 +236,9 @@ func (p *Pool) Run(ctx context.Context) {
 	p.healthMu.Unlock()
 
 	go p.runExitPoll(ctx)
+	if p.cfg.ExitTTL > 0 {
+		go p.runRotationSchedule(ctx)
+	}
 
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
@@ -500,13 +510,19 @@ func (p *Pool) beginRotationExclusive(instance int) bool {
 // endRotation clears the mark and starts the grace period during which the
 // instance is not blamed for the failures its own rotation caused.
 func (p *Pool) endRotation(instance int) {
+	now := time.Now()
+
 	p.healthMu.Lock()
 	if p.rotating[instance] <= 1 {
 		delete(p.rotating, instance)
 	} else {
 		p.rotating[instance]--
 	}
-	p.quietUntil[instance] = time.Now().Add(rotationGrace)
+	p.quietUntil[instance] = now.Add(rotationGrace)
+	// Every rotation ends here, so this is the one place the scheduled-rotation
+	// clock has to restart — an attempt that failed against a wedged control port
+	// included, or the schedule would retry it on every tick.
+	p.exitSince[instance] = now
 	p.healthMu.Unlock()
 }
 

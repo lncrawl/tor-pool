@@ -163,6 +163,7 @@ while one is running starts nothing and answers `{"rotating": 0, "in_progress": 
   "uptime_secs": 3612, "sessions": 3, "socks_addr": "127.0.0.1:19000",
   "exit_ip": "185.220.101.5", "exit_country": "DE", "exit_nickname": "SomeRelay",
   "retired_exit_ip": "", "exit_confirmed": true, "pinned_exit": "",
+  "rotate_pending": false,
   "health": {
     "state": "healthy", "failures_in_window": 0, "consecutive_failures": 0,
     "failure_score": 0, "quarantine_score": 10,
@@ -190,6 +191,10 @@ otherwise. While it is set, `exit_ip` is a promise about the next request too.
 
 `retired_exit_ip` is set only while `exit_ip` is empty, and carries the exit the rotation
 discarded so a dashboard can show what it *was*. Never read it as the current exit.
+
+`rotate_pending` says this exit identity has outlived `EXIT_TTL` and the instance is queued
+for rotation, which happens as soon as nothing is pinned to it — so `sessions` on the same
+object is the reason it has not yet. Always `false` when `EXIT_TTL` is `0`.
 
 `state` is one of `starting`, `healthy`, `degraded`, `probation`, `quarantined`,
 `remediating`.

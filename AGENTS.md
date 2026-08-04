@@ -188,6 +188,16 @@ isn't.
     so weighing only decides the outcome for a caller that succeeds between failures — never
     describe a weight as *the* threshold.
 
+22. **A scheduled rotation yields to sessions, and its clock restarts on the attempt.**
+    `EXIT_TTL` is a floor on how long an *unused* exit identity survives, not a period: an
+    instance with a session pinned to it stays queued, because rotating there would change
+    the exit IP of a caller that asked to be sticky and never asked to rotate — the promise
+    the pool exists to keep. Idle-but-pinned still counts; `SESSION_TTL` is what turns an
+    abandoned instance into an eligible one. The clock restarts in `endRotation`, which every
+    rotation reaches whether it succeeded or not, so a rotation that fails against a wedged
+    control port waits another `EXIT_TTL` instead of being retried every tick. Restarts reset
+    it separately (`resetExitAge`) — they hand back an identity the clock was not measuring.
+
 ## Skills
 
 Read these before working in their area:
