@@ -280,15 +280,20 @@ type InstanceView struct {
 	ExitConfirmed bool `json:"exit_confirmed"`
 	// PinnedExit is the relay this instance is locked to, when PIN_EXIT_RELAY is
 	// on. Empty means tor is choosing exits for itself.
-	PinnedExit string               `json:"pinned_exit"`
-	Health     pool.HealthView      `json:"health"`
-	Totals     stats.InstanceTotals `json:"totals"`
+	PinnedExit string `json:"pinned_exit"`
+	// RotatePending says the exit identity has outlived EXIT_TTL and the instance
+	// is queued: it rotates as soon as no session is pinned to it. Reported
+	// because Sessions is then the explanation for why it has not.
+	RotatePending bool                 `json:"rotate_pending"`
+	Health        pool.HealthView      `json:"health"`
+	Totals        stats.InstanceTotals `json:"totals"`
 }
 
 func (s *Server) instanceViews() []InstanceView {
 	instances := s.pool.Fleet().Instances()
 	counts := s.pool.SessionsPerInstance()
 	health := s.pool.Health()
+	pending := s.pool.RotationPending()
 	collector := s.pool.Stats()
 
 	out := make([]InstanceView, 0, len(instances))
@@ -313,6 +318,7 @@ func (s *Server) instanceViews() []InstanceView {
 			RetiredExitIP: inst.RetiredExit().Address,
 			ExitConfirmed: inst.ExitConfirmed(),
 			PinnedExit:    inst.PinnedExit(),
+			RotatePending: pending[id],
 			Health:        health[id],
 			Totals:        collector.Instance(id),
 		})

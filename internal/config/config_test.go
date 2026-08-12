@@ -123,6 +123,22 @@ func TestDrainOnRotateIsOnUnlessDisabled(t *testing.T) {
 	}
 }
 
+func TestExitTTLZeroIsValidAndDisablesTheSchedule(t *testing.T) {
+	// 0 is how an operator keeps an exit until it fails or is rotated by hand, so
+	// it has to validate; a negative one is a typo for that and must not.
+	c, err := loadFrom(env(map[string]string{"EXIT_TTL": "0s"}))
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if c.ExitTTL != 0 {
+		t.Errorf("ExitTTL = %s, want 0", c.ExitTTL)
+	}
+
+	if _, err := loadFrom(env(map[string]string{"EXIT_TTL": "-5m"})); err == nil {
+		t.Error("expected an error for a negative EXIT_TTL")
+	}
+}
+
 func TestEmptyHTTPPortDisablesListener(t *testing.T) {
 	c, err := loadFrom(env(map[string]string{"HTTP_PORT": ""}))
 	if err != nil {

@@ -97,6 +97,19 @@ export function Instances() {
               {r.health.remediation_rung}
             </Typography.Text>
           )}
+          {/* Queued, not stuck: the session count in the row is the reason it
+              has not rotated yet, and the tooltip says so. */}
+          {r.rotate_pending && (
+            <Tooltip
+              title={
+                r.sessions > 0
+                  ? `This exit has been in use for longer than EXIT_TTL. It rotates once its ${r.sessions} session(s) finish.`
+                  : 'This exit has been in use for longer than EXIT_TTL and nothing is using the instance, so it rotates within seconds.'
+              }
+            >
+              <Tag>rotate queued</Tag>
+            </Tooltip>
+          )}
         </Space>
       ),
       filters: [

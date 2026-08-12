@@ -192,6 +192,7 @@ Everything is an environment variable. The common ones:
 | `DEFAULT_SESSION` | `ip` | How a caller that names no session is pinned: `ip`, `random`, `shared`. |
 | `SESSION_TTL` | 10m | Unpin a session after this long idle. |
 | `SESSION_PORT_BASE` | — | Open one credential-free SOCKS port per instance, at base+N. For callers that cannot send a username — see below. Needs `AUTH_DISABLED`. |
+| `EXIT_TTL` | 3h | Queue an instance for a new circuit once it has held one exit this long. It waits until no session is pinned to it, so a caller is never rotated out from under. `0` disables it. |
 | `QUARANTINE_FAILURES` | 5 | Unclassified failures within `FAILURE_WINDOW` before quarantine. A captcha spends several of them, a rate limit less than one. |
 | `PIN_EXIT_RELAY` | false | Lock each instance to one exit relay, so same session means same exit IP. |
 | `TOR_EXIT_NODES` | — | Restrict exits, e.g. `{us},{ca}`. |

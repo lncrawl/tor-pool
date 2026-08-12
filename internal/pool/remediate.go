@@ -266,6 +266,7 @@ func (p *Pool) restartUnhealthy(ctx context.Context, inst *tor.Instance, reason 
 		delete(p.startAttempts, index)
 		p.healthMu.Unlock()
 
+		p.resetExitAge(index)
 		p.healthFor(index).release()
 		p.log.Info("instance restarted", "instance", index, "reason", reason)
 	}()
@@ -430,6 +431,7 @@ func (p *Pool) RestartInstance(instance int, wipe bool) error {
 	if err := inst.Restart(p.poolCtx(), wipe); err != nil {
 		return err
 	}
+	p.resetExitAge(instance)
 	h.release()
 	p.log.Info("instance restarted", "instance", instance, "wiped", wipe)
 	detail := "state kept"

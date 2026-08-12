@@ -106,6 +106,46 @@ mid-rotation unless there is nothing else to pin it to — the sequence is mark,
 then rotate, so requests arriving during a rotation are not handed an instance without
 circuits.
 
+## Scheduled rotation
+
+`EXIT_TTL` is how long an instance may hold one exit identity before the pool queues it for
+a new circuit. It exists for the failure the ladder cannot pre-empt: an exit a target site
+has quietly started scoring is not *broken*, so nothing reports it, and the instance keeps
+that IP until something finally fails hard enough to be counted.
+
+**A queued instance rotates only once no session is pinned to it.** A session asked to be
+sticky, and its exit IP is the identity it was promised — rotating underneath one would
+break the promise the whole pool is built around, so the clock never outranks a caller.
+Read `EXIT_TTL` as a floor on an identity's age rather than as a period: an instance under
+steady traffic rotates when its callers ask it to, and `SESSION_TTL` is what eventually
+frees one whose callers have gone. A pinned session with no request in flight still counts;
+so does a session that would be unpinned seconds later.
+
+Instances rotate one at a time, however many fall due together — a whole pool signalled at
+once has nothing holding circuits for a second or two, which is the state a pool exists to
+prevent. Rotations are visible in the event log, and an instance waiting on its sessions
+shows as `rotate queued` in the dashboard with `rotate_pending` in the API, so a queue that
+is not draining is always explained by the session count beside it.
+
+Shortening it suits a target that scores IP reputation. The cost is real: every rotation
+spends a working exit, discards a warmed circuit and pays Tor's `NEWNYM` cooldown, and the
+replacement comes from the same few thousand exit relays, so a relay a site dislikes comes
+back around. Set it to `0` to disable the schedule entirely and keep each exit until it
+fails or an operator rotates it.
+
+Note that without `PIN_EXIT_RELAY` an instance may serve more than one exit IP inside a
+single identity anyway, because Tor picks between the exit-bearing circuits it holds — see
+the note under `PIN_EXIT_RELAY` below. `EXIT_TTL` bounds the age of the identity, not the
+number of IPs seen during it.
+
+That is also where the default's length comes from. With pinning off, Tor's own circuit
+timers move the exit well inside a default `EXIT_TTL` — a circuit that has carried a request
+stops taking new ones at `TOR_MAX_CIRCUIT_DIRTINESS`, and one that never carried any expires
+under Tor's clean-circuit timers — so the schedule adds little on an unpinned pool. With
+`PIN_EXIT_RELAY` on it is the only thing that retires an identity at all, because the pin
+holds the exit across every rebuild Tor makes. Shorten it if you want the schedule to pace
+exit changes rather than backstop them.
+
 ## Health and remediation
 
 Two thresholds, because they catch different failures:

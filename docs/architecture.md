@@ -110,6 +110,24 @@ for its whole life and closing one would fail a request already in flight.
 Because a stream only exists during a request, the exit is sampled shortly after a
 connection is established, debounced per instance, plus a slow background refresh.
 
+## Rotating on a schedule
+
+An instance's identity clock starts when it first becomes routable and restarts on every
+rotation, remediation and restart. Once it passes `EXIT_TTL` the instance is queued, and the
+scheduler rotates it as soon as no session is pinned to it — one instance per tick, so a
+whole pool falling due together is still rotated in turn rather than all at once.
+
+The session gate is the whole design. A scheduled rotation is the pool acting on its own
+initiative, and doing that under a pinned session would change the exit IP of a caller that
+asked to be sticky and never asked to rotate. So the clock yields to callers: it bounds how
+long an *unused* identity survives, and `SESSION_TTL` is what turns an abandoned instance
+into an unused one. An instance under permanent load rotates only when its callers do.
+
+The clock restarts on the attempt, not on the result. A rotation that fails against a wedged
+control port therefore waits another `EXIT_TTL` instead of being retried every tick — a
+control port that will not answer is the failure ladder's problem, and requests through that
+instance are what tell it so.
+
 ## Failure accounting
 
 Per instance, over a sliding window, from two sources:

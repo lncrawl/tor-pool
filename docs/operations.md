@@ -22,6 +22,10 @@ means that exit is being *blocked*, not broken. Hover it for the breakdown by ki
 weighted score: captchas mean burnt exits, while a column of nothing but rate limits means
 your callers are going too fast and the exits are fine.
 
+A `rotate queued` tag means that exit has outlived `EXIT_TTL` and the instance is waiting
+for its sessions to finish before it rotates — the session count in the same row is the
+reason, and it is not a fault.
+
 **Sessions** answers "why does this caller keep failing". Find the key, see which
 instance it is pinned to, cross-reference in Instances.
 
@@ -56,6 +60,11 @@ be minutes, deliberately.
   soft-blocked exit looks perfectly healthy; with every failure sent as one undifferentiated
   reason, a captcha waits as long as a 429 does. A client that sends `kind` gets a burnt exit
   retired in two reports without lowering the threshold for everything else.
+- Shorten `EXIT_TTL` so an exit is retired for being *old* rather than only for failing,
+  which is the only thing that pre-empts a site quietly scoring an IP. It costs working
+  exits and warmed circuits, and it never interrupts a caller: a queued instance waits for
+  its sessions, so on a pool under constant load the schedule does little until
+  `SESSION_TTL` frees an instance.
 - Consider `TOR_EXIT_NODES` if the target blocks whole regions — but a narrow policy
   shrinks the relay set and makes circuits slower and less diverse.
 

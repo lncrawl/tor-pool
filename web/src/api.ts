@@ -64,6 +64,10 @@ export interface Instance {
   exit_confirmed: boolean;
   // The relay this instance is locked to, when PIN_EXIT_RELAY is on.
   pinned_exit: string;
+  // The exit identity has outlived EXIT_TTL and the instance is queued: it
+  // rotates as soon as no session is pinned to it, so `sessions` is why it has
+  // not yet.
+  rotate_pending: boolean;
   health: Health;
   totals: InstanceTotals;
 }

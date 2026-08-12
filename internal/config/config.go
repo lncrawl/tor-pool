@@ -102,6 +102,16 @@ type Config struct {
 	MaxSessions    int
 	DrainOnRotate  bool
 
+	// ExitTTL is how long an instance may keep one exit identity before it is
+	// queued for rotation. Zero disables the schedule.
+	//
+	// It is a floor on the identity's age, not a period: a queued instance only
+	// rotates once no session is pinned to it, because a session asked to be
+	// sticky and its exit IP is the identity it was promised. A permanently busy
+	// instance therefore rotates when its callers ask, and SESSION_TTL is what
+	// eventually lets an abandoned one through.
+	ExitTTL time.Duration
+
 	// Health and remediation
 	FailureWindow         time.Duration
 	QuarantineFailures    int
@@ -175,6 +185,30 @@ func Defaults() Config {
 		// off when a session's stickiness matters more than its exit — a login
 		// that the target site has tied to one IP, say.
 		DrainOnRotate: true,
+
+		// Three hours, and the number is a compromise between two costs rather
+		// than a measurement. Too short and instances rotate for the sake of it:
+		// every rotation spends a working exit, throws away a warmed circuit and
+		// pays tor's NEWNYM cooldown, and the replacement is drawn from the same
+		// few thousand exits — so a relay a site dislikes comes back around
+		// anyway. Too long and an exit a target has quietly started scoring sits
+		// there until something fails hard enough for the ladder to notice, which
+		// is what this exists to pre-empt.
+		//
+		// Deliberately well past TOR_MAX_CIRCUIT_DIRTINESS rather than under it.
+		// This is a backstop for the identity nothing else retires, not the thing
+		// that paces exit changes. Without PIN_EXIT_RELAY tor moves the exit on
+		// its own timers well inside this window — a circuit that has carried a
+		// stream stops taking new ones at TOR_MAX_CIRCUIT_DIRTINESS, and one that
+		// never carried any expires under tor's clean-circuit timers instead — so
+		// the schedule adds little there. With pinning on it is the only thing
+		// that retires an identity at all: the pin holds the exit across every
+		// rebuild tor makes, so an instance keeps one relay until it fails.
+		//
+		// On by default only because of the session gate: an instance nothing is
+		// pinned to has no caller whose identity this can change underneath. Set
+		// EXIT_TTL=0 to keep an exit until it fails or is rotated by hand.
+		ExitTTL: 3 * time.Hour,
 
 		FailureWindow:         time.Minute,
 		QuarantineFailures:    5,
@@ -299,6 +333,7 @@ func loadFrom(look lookupFunc) (Config, error) {
 	collect(envSessionSource(look, "DEFAULT_SESSION", &c.DefaultSession))
 	collect(envInt(look, "MAX_SESSIONS", &c.MaxSessions))
 	collect(envBool(look, "DRAIN_ON_ROTATE", &c.DrainOnRotate))
+	collect(envDuration(look, "EXIT_TTL", &c.ExitTTL))
 
 	collect(envDuration(look, "FAILURE_WINDOW", &c.FailureWindow))
 	collect(envInt(look, "QUARANTINE_FAILURES", &c.QuarantineFailures))
@@ -390,6 +425,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxSessions < 1 {
 		bad("MAX_SESSIONS must be at least 1, got %d", c.MaxSessions)
+	}
+	if c.ExitTTL < 0 {
+		bad("EXIT_TTL cannot be negative (0 disables scheduled rotation)")
 	}
 	if c.FailureWindow <= 0 {
 		bad("FAILURE_WINDOW must be positive")
