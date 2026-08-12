@@ -4,7 +4,7 @@ All notable changes are documented here. The format is based on [Keep a Changelo
 
 `ghcr.io/lncrawl/tor-pool:latest` is the newest release below; `:edge` is the tip of `main`. See the [releasing notes](.claude/skills/releasing/SKILL.md) for what each tag means.
 
-## [Unreleased]
+## [0.4.0] - 2026-08-12
 
 ### Added
 
@@ -113,6 +113,7 @@ The first release with notes. The earlier `v0.0.x` tags were created automatical
 - Retired instances no longer leave their per-instance counters behind, a resize honours `SPAWN_STAGGER`, `POST /api/instances/{id}/drain` answers 404 for an instance that does not exist, and `?newnym=1` is accepted alongside `?newnym=true`.
 - Fixed data races on an instance's process handle during a restart, and on the NEWNYM cooldown timestamp.
 
+[0.4.0]: https://github.com/lncrawl/tor-pool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lncrawl/tor-pool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lncrawl/tor-pool/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lncrawl/tor-pool/releases/tag/v0.1.0
